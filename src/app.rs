@@ -2,7 +2,9 @@ use crate::api::SuperProductivityClient;
 use crate::config::{AppConfig, KeybindMode};
 use crate::keybinds::{JkEscapeTracker, JkResult, SequenceState};
 use crate::models::{CreateTaskPayload, Project, Tag, Task};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
@@ -498,6 +500,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
         if self.renaming_task_id.is_some() {
             self.handle_rename_key(key);
             return;
@@ -1037,5 +1042,25 @@ impl App {
             },
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_key_events_are_ignored() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        app.focus = FocusSection::Nav;
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.nav_selected, 1);
+
+        let mut release = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
+        app.handle_key(release);
+        assert_eq!(app.nav_selected, 1);
     }
 }
