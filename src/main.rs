@@ -3,6 +3,7 @@ mod app;
 mod config;
 mod keybinds;
 mod models;
+mod short_syntax;
 mod theme;
 mod ui;
 

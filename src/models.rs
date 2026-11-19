@@ -19,6 +19,10 @@ pub struct Task {
     #[serde(default)]
     pub due_day: Option<String>,
     #[serde(default)]
+    pub deadline_day: Option<String>,
+    #[serde(default)]
+    pub done_on: Option<u64>,
+    #[serde(default)]
     pub time_estimate: Option<u64>,
     #[serde(default)]
     pub time_spent: Option<u64>,
@@ -102,7 +106,11 @@ pub struct CreateTaskPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub due_day: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub deadline_day: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub time_estimate: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_spent: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_add_to_top: Option<bool>,
 }
