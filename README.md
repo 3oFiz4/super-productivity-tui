@@ -35,6 +35,35 @@ Manage your tasks, subtasks, projects, tags, deadlines, focus sessions, daily ha
 
 ---
 
+## Incoming Features
+
+Planned features and improvements for future releases of `spt`:
+
+1. **Offline Queue & Local Cache**: Queue task creations/updates locally when Super Productivity is closed and replay them automatically on reconnect.
+2. **Active Time-Tracking Controls**: Start/pause/stop Super Productivity's live task timer directly from the task list with a ticking status-bar indicator.
+3. **Daily Summary & End-of-Day Review**: Interactive wrap-up modal showing completed tasks, total focus time, and carry-over prompts for unfinished tasks.
+4. **Vim Visual / Multi-Select Mode (`v` / `V`)**: Select multiple tasks to batch-complete, reschedule, move to a project, or delete in one action.
+5. **Custom Keybind Remapping**: Override or bind any action to custom keys or leader-key chords in `config.toml`.
+6. **Natural Language Due & Repeat Parsing**: Support phrases like `every weekday`, `in 3 days`, `next month`, and `every 2 weeks` in short syntax.
+7. **Inline Task Editing (`e` / `i`)**: Edit task titles, time estimates, and due dates inline without opening a full modal.
+8. **External `$EDITOR` Notes**: Press a keybind to edit long Markdown task notes in `nvim`, `vim`, or `$EDITOR`.
+9. **Task Attachments & Links**: View, add, and open URLs or local file attachments linked to a task.
+10. **Saved Filters & Smart Views**: User-defined filter queries (e.g., `overdue`, `high-estimate`, `@work + !today`) pinned to the sidebar.
+11. **Project & Tag Management**: Full CRUD/reordering/color editing for Projects and Tags once supported by the Local REST API.
+12. **Split-Pane / Dual-Column Mode**: View two lists side-by-side (e.g., `Inbox` + `Today`) for drag-free keyboard triage.
+13. **Desktop Notifications & Sound Alerts**: Optional OS notifications and terminal bell/audio cues when Pomodoro, Flowtime, or Countdown timers finish.
+14. **Time-Blocking / Agenda Timeline**: Hourly day-planner view to slot scheduled tasks into time blocks.
+15. **Habit Streaks & Counter History**: Multi-day streak tracking and sparkline charts for Simple Counters.
+16. **CSV / JSON / Markdown Export**: Export Worklog and History reports directly to Markdown tables, CSV, or JSON.
+17. **Mouse Drag & Click Support**: Clickable sidebar items, task checkboxes, and scroll-wheel support across all panels.
+18. **CLI Subcommands (`spt add`, `spt ls`, `spt sync`)**: Scriptable non-interactive CLI mode for shell aliases, cron jobs, and status bars (Waybar/Polybar/tmux).
+19. **Plugin / Webhook Hooks**: Run custom shell scripts on events like `task_completed` or `pomodoro_finished`.
+20. **Multi-Instance Profiles**: Switch between multiple Super Productivity API endpoints/tokens (e.g., Work vs. Personal) from `:s` or CLI flags.
+21. **Undo/Redo Persistence**: Persist the 100-step undo history across `spt` restarts.
+22. **Custom Nerd Font / ASCII Icon Toggle**: Config option to switch cleanly between Nerd Font glyphs and pure ASCII/Unicode symbols.
+
+---
+
 ## Requirements
 
 - [Rust toolchain](https://rustup.rs/) (`cargo`, `rustc` supporting Rust 2024 edition)
