@@ -1,0 +1,211 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Hello, World!</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  </head>
+  <body>
+    <!-- This navigation has two options
+        Normal: Intuitive keybind
+        NVIM: keybind highly similar to Normal
+        or Both
+
+        This apply for all buttons below. 
+
+        Since we have two options, there's also two way to open everything.
+
+        But I also wanted to make sure the opening is intuitive (assign hintKeybind: true), where if this is true, the label will have [] surrounding it, meaning thats the hint.
+
+        For example:
+        `[h]ide [n]avigation (#Normal)`
+        `[z]hide [n]avigation (#Nvim)`
+
+        Modifiable in the options.
+      -->
+    <!--
+        @Ensure there is another UI that shows the list of keybinds, mapped as :h, ensure it has a search button that finds the keybind, and also the description of what it does (green colored for Vim user if #VIM active) (normal color for Normal user #VIM inactive) 
+
+        To navigate between section: `Tab` or `Shift Tab` (reverse) (#Normal)
+        To navigate between section: `<C-h>` or `<C-l>` (reverse) (#NVIM)
+        To navigate between buttons/todo: `Up arrow` or `Down arrow` (reverse) (#Normal)
+        To navigate between buttons/todo: `k` or `j` (reverse) (#NVIM)
+        To go to main area section: `ga` (#Normal and #NVIM)
+        To go to nav area section: `gn` (#Normal and #NVIM)
+
+        Regarding properties, or whenever user clicked O (properties / right click), ensure user keybind focus change at that time, so lets say in the properites there is called Rename feature (r mapped), but globally speaking, r is mapped to settings, ensure when it is focused on properties everything keybinds enabled except everything under properties, if possible, make the UI outside properties somewhat fades.
+        As for now, just add Rename (mapped r) opt, under properties.
+      -->
+    <!-- Ensure all buttons in here can be right clicked (keybind p for Normal, keybind O for NVIM) where it will shows stacked stuff of History, Settings (for now) -->
+    <!-- Ensure all buttons in here can be left clicked (keybind <Enter> for Normal, keybind o(pen) for NVIM) where it will shows stacked stuff of History, Settings (for now) -->
+    <div class="h-[40rem] w-full bg-[#232323] flex w-full min-h-screen gap-1">
+      <!-- Navigation -->
+      <!-- @Ensure this width adjust its own width when the terminal width or height changes -->
+      <!-- @The border between another section besides must have a vertical border composed of | vertically stacked. Right in the middle is a text that says `[h]ide [n]avigation (#Normal)`
+        `[z]hide [n]avigation (#Nvim)`-->
+      <section class="w-[20%] shrink-0 flex flex-col h-screen">
+        <div class="w-full min-h-[80%] shrink-0">
+          <!-- @Ensure the width of all buttons under this section fits up to 20 buttons -->
+          <button
+            class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+          >
+            <span class="text-gray-200 text-sm">Dashboard</span>
+            <span class="text-gray-200 text-sm">12</span>
+          </button>
+          <button
+            class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+          >
+            <span class="text-gray-200 text-sm">Inbox</span>
+            <span class="text-gray-200 text-sm">6</span>
+          </button>
+          <div
+            class="flex items-center justify-center w-full px-3 py-2 text-white"
+          >
+            <span class="text-white/10">-------------------------</span>
+          </div>
+          <button
+            class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+          >
+            <span class="text-gray-200 text-sm">[+] Projects</span>
+            <span class="text-gray-200 text-sm">:</span>
+          </button>
+          <button
+            class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+          >
+            <span class="text-violet-500 text-sm"
+              >&nbsp;&nbsp;&nbsp;&nbsp;-> []Inbox</span
+            >
+            <!-- @The logo before 'Inbox' are supposed to be folder icon -->
+            <span class="text-gray-200 text-sm">1</span>
+          </button>
+          <button
+            class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+          >
+            <span class="text-gray-200 text-sm">[+] Tags</span>
+            <span class="text-gray-200 text-sm">:</span>
+          </button>
+          <button
+            class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+          >
+            <span class="text-green-500 text-sm"
+              >&nbsp;&nbsp;&nbsp;&nbsp;-> #important</span
+            >
+            <!-- @The logo before 'Inbox' are supposed to be hashtag icon (not text) -->
+            <span class="text-gray-200 text-sm">1</span>
+          </button>
+        </div>
+        <!-- @The section right on the most bottom after buttons above -->
+        <div class="w-full shrink-0 h-auto">
+          <button
+            class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+          >
+            <span class="text-gray-200 text-sm">Upcoming</span>
+            <!-- @The logo before 'Settings' are supposed to be list (like = but three lines, not two) icon -->
+          </button>
+          <button
+            class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+          >
+            <span class="text-gray-200 text-sm">! Help</span>
+            <!-- @The logo before 'Settings' are supposed to be ? icon -->
+          </button>
+          <button
+            class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+          >
+            <span class="text-gray-200 text-sm">@ Settings</span>
+            <!-- @The logo before 'Settings' are supposed to be gear icon -->
+          </button>
+        </div>
+      </section>
+
+      <!-- Main Area -->
+      <section class="flex-1 shrink-0">
+        <div class="w-full h-full px-[20%] py-6">
+          <!-- Keybinds 
+                    ---- #NVIM ----
+                    o = check/uncheck a todo (similar to nav section)
+                    O = properties
+                    i = rename the task, but do not remove it as a whole, just act as an insert (enter or jk to leave Normal mode)
+
+                  --->
+          <button
+            class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+          >
+            <label
+              class="inline-flex items-center gap-2 cursor-pointer select-none"
+            >
+              <input type="checkbox" class="peer sr-only" />
+
+              <span
+                class="w-5 h-5 border border-gray-500 rounded flex items-center justify-center transition-all duration-200 peer-checked:bg-blue-500 peer-checked:border-blue-500 peer-focus-visible:ring-2 peer-focus-visible:ring-blue-400"
+              >
+                <svg
+                  class="w-3.5 h-3.5 text-white scale-0 peer-checked:scale-100 transition-transform duration-200"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="3"
+                >
+                  <path d="M5 12l5 5L20 7" />
+                </svg>
+              </span>
+            </label>
+            <div
+              class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+            >
+              <span class="text-gray-200 text-sm">Task 1</span>
+              <div>
+                <span class="text-gray-500 text-sm"
+                  >R:Every day
+                  <!-- @The logo is two arrow rotating --></span
+                >
+                <span class="text-violet-500 text-sm">[]Inbox</span>
+                <!-- @The logo is Folder -->
+                <span class="text-green-500 text-sm">#important</span>
+                <!-- @The logo is Folder -->
+              </div>
+            </div>
+          </button>
+          <button
+            class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+          >
+            <label
+              class="inline-flex items-center gap-2 cursor-pointer select-none"
+            >
+              <input type="checkbox" class="peer sr-only" />
+
+              <span
+                class="w-5 h-5 border border-gray-500 rounded flex items-center justify-center transition-all duration-200 peer-checked:bg-blue-500 peer-checked:border-blue-500 peer-focus-visible:ring-2 peer-focus-visible:ring-blue-400"
+              >
+                <svg
+                  class="w-3.5 h-3.5 text-white scale-0 peer-checked:scale-100 transition-transform duration-200"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="3"
+                >
+                  <path d="M5 12l5 5L20 7" />
+                </svg>
+              </span>
+            </label>
+            <div
+              class="flex items-center justify-between w-full px-3 py-2 text-white hover:bg-white/10 active:bg-white/40"
+            >
+              <span class="text-gray-200 text-sm">Task 2</span>
+              <div>
+                <span class="text-gray-500 text-sm"
+                  >R:Every day
+                  <!-- @The logo is two arrow rotating --></span
+                >
+                <span class="text-violet-500 text-sm">[]Inbox</span>
+                <!-- @The logo is Folder -->
+                <span class="text-green-500 text-sm">#important</span>
+                <!-- @The logo is Folder -->
+              </div>
+            </div>
+          </button>
+        </div>
+      </section>
+    </div>
+    <p id="currentTime"></p>
+  </body>
+</html>

@@ -1,49 +1,50 @@
 # Super Productivity TUI
 
-A crazy fast vim-supported terminal client for **Super Productivity**, made in Rust (ratatui) and connected to Super Productivity's Local REST API.
+A blazing fast vim-supported terminal client for **Super Productivity (SP)**, made in Rust (ratatui) and connected to Super Productivity's Local REST API.
 
-Manage your tasks, subtasks, projects, tags, deadlines, focus sessions, daily habits, worklogs, and terminal colorschemes without having to open super-productivity EVER...
+Freely manage your tasks, subtasks, projects, tags, deadlines, focus sessions, daily habits, worklogs, and terminal colorschemes without having to open super-productivity EVER... i mean it.
 
 ---
 
 ## Features
 
-- **Views & Organization**: `Inbox`, `Today`, `Planned`, `History`, `Counters`, `Projects`, and `Tags` in a collapsible navigation sidebar (`Space` / `Enter` / `l`).
+- **Views & Organization**: `Inbox`, `Today`, `Planned`, `History`, `Counters`, `Projects`, and `Tags` literally in a small collapsible navigation sidebar (`Space` / `Enter` / `l`).
 - **Flexible Keybinds (`Both`, `NVIM`, `Normal`)**:
+  - Incase you're not familiar with vim (which is sad but is ok), there's an alternative!
   - `hjkl` and arrow movement, `gg` / `G` jump to top/bottom, live `/` fuzzy task search.
   - Neovim-style `:` command palette (`:c` colorscheme, `:h` help, `:s` settings, `:p` focus timer, `:hist` worklog, `:cnt` counters, `:q` quit).
-  - Vim-style pending command display in the status bar and `jk` alternative to `Esc` in modals/dropdowns.
+  - Vim-like pending command display in the status bar and `jk` alternative to `Esc` in modals/dropdowns.
 - **Short Syntax Task Creation (`a`)**:
-  - Type `+project`, `#tag`, `t1h5m3s` (or `t30m/1h`), `@tomorrow` / `@2026-12-01`, and `!friday` directly in the task title with floating live completion.
-  - Pre-selects the currently viewed project automatically.
+  - Just type `+project`, `#tag`, `t1h5m3s` (or `t30m/1h`), `@tomorrow` / `@2026-12-01`, and `!friday` directly in the task title with floating live completion.
+  - It also pre-selects the currently viewed project automatically :-).
 - **Inline Subtasks & Markdown Notes**:
   - Expand/collapse subtasks directly under parent tasks (`Tab` or `>`), navigate into subtasks with `hjkl`, toggle completion checkboxes (`Space`), and view Markdown-styled notes (full view with `Shift+N`).
 - **Context-Aware Properties Dropdown (`o` / `l`)**:
-  - Schedule shortcuts (`sd` Today, `sm` Tomorrow, `sn` Next Week, `u` Unschedule, `R` Interactive Calendar Date Picker).
+  - Schedule shortcuts (`sd` Today, `sm` Tomorrow, `sn` Next Week, `u` Unschedule, `R` Interactive Calendar Date Picker). Mapping sounds weird eh? Until you decide to see it directly then you'll get the intuition later!
   - Repeat presets, Move Top/Bottom (`mt`/`mb`), Move to Project (`mp`), Add Subtask (`as`), Duplicate (`d`), Delete (`x`).
   - Also works on Projects and Tags in the sidebar.
 - **3-Mode Focus Timer (`:p` or `P`)**:
   - **Pomodoro**: 25m focus / 5m short break / 15m long break sprints.
   - **Flowtime**: Open-ended count-up timer that calculates an earned break (`elapsed / 5`, minimum 1m).
   - **Countdown**: Custom target countdown (`5m`–`180m`, adjustable with `+`/`-`).
-- **100-Step Undo / Redo**: Press `u` to undo and `Ctrl+R` (or `U`/`r` in Normal mode) to redo up to 100 task mutations.
+- **100-Step Undo / Redo**: Press `u` to undo and `Ctrl+R` (or `U`/`r` in Normal mode) to redo up to 100 task mutations. Now it's not really clear what mistake could happen up to 100 steps lol.
 - **Worklog / History (`:hist`) & Simple Counters (`:cnt`)**: Inspect time spent by Day/Week/Month across Projects and Tags, and track daily counters/habits.
 - **Live Theme Editor & 2D Color Picker (`:c`)**:
   - 21 built-in themes including `AMOLED`, `Catppuccin Mocha`, `Catppuccin Latte`, `Tokyo Night`, `Gruvbox Dark`, `Nord`, `Dracula`, `One Dark`, `Solarized Dark/Light`, `Monokai Pro`, `Everforest Dark`, `Kanagawa`, `Rose Pine`, `Rose Pine Moon`, `GitHub Dark`, `Ayu Dark`, `Nightfox`, `Cyberpunk`, `Material Ocean`, and `Default`.
   - Live non-dimmed preview, interactive 2D RGB map + HEX color editor, custom theme saving.
-- **Auto-Sync & Manual Sync (`S`)**: Automatically syncs on startup, after API mutations, and every **30 seconds** in the background while idle; press `S` at any time for an immediate sync.
+- **Auto-Sync & Manual Sync (`S`)**: Automatically syncs on startup, after API mutations, and every **30 seconds** in the background while idle; press `S` at any time for an immediate sync, if the automatic sync fails :3.
 
 ---
 
 ## Incoming Features
 
-Planned features and improvements for future releases of `spt`:
+Ranked from most prioritized to less. Want to suggest a feature? Create a Issue, and let me know!
 
 1. **Offline Queue & Local Cache**: Queue task creations/updates locally when Super Productivity is closed and replay them automatically on reconnect.
 2. **Active Time-Tracking Controls**: Start/pause/stop Super Productivity's live task timer directly from the task list with a ticking status-bar indicator.
 3. **Daily Summary & End-of-Day Review**: Interactive wrap-up modal showing completed tasks, total focus time, and carry-over prompts for unfinished tasks.
-4. **Vim Visual / Multi-Select Mode (`v` / `V`)**: Select multiple tasks to batch-complete, reschedule, move to a project, or delete in one action.
-5. **Custom Keybind Remapping**: Override or bind any action to custom keys or leader-key chords in `config.toml`.
+4. **Vim Visual / Multi-Select Mode (`v` / `V`)**: Select multiple tasks to batch-complete, reschedule, move to a project, or delete in one action. Even SP didn't support this lol.
+5. **Custom Keybind Remapping**: Override or bind any action to custom keys or leader-key chords in `config.toml`. Keybind too hard to follow? (sorry :3), make your own then.
 6. **Natural Language Due & Repeat Parsing**: Support phrases like `every weekday`, `in 3 days`, `next month`, and `every 2 weeks` in short syntax.
 7. **Inline Task Editing (`e` / `i`)**: Edit task titles, time estimates, and due dates inline without opening a full modal.
 8. **External `$EDITOR` Notes**: Press a keybind to edit long Markdown task notes in `nvim`, `vim`, or `$EDITOR`.
@@ -89,17 +90,28 @@ cargo install --path .
 spt
 ```
 
+ORRRRRR just go to release and install it already as ready-to-use `.exe` :3:
+
 ### Configuration
 
 1. Open Super Productivity and enable the **Local REST API** + copy your Bearer token.
 2. Launch `spt` and press `:s` (or click Settings in the sidebar) to enter:
    - **API URL** (default: `http://127.0.0.1:3876`)
-   - **API Token**
+   - **API Token** (still not sure where? Please check ![#### Getting your token])
    - **Keybind Mode** (`Both`, `NVIM`, or `Normal`)
    - **Keybind Hinting** (underline/highlight mnemonic letters)
 3. Configuration, saved themes, and local counter fallbacks are stored automatically at:
    - Linux/macOS: `~/.config/super-productivity-tui/config.toml`
    - Windows: `%APPDATA%\super-productivity-tui\config.toml`
+
+#### Getting your Token
+
+1. On Super productivity, head to Settings.
+2. Go to `General`
+3. Scroll down to `Misc Settings` section
+4. Enable `Enable local REST API`
+5. Copy your `Access Token`
+6. Done :3.... don't leak it though.
 
 ---
 

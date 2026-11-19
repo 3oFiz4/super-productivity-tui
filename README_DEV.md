@@ -1,6 +1,6 @@
 # Developer Documentation (`README_DEV.md`)
 
-Technical architecture, module map, data flows, and contributor notes for **Super Productivity TUI**.
+Hello, programmers! This is a technical architecture, module map, data flows, and contributor notes for **Super Productivity TUI**.
 
 ---
 
@@ -29,17 +29,17 @@ flowchart TD
 
 ## Module Structure
 
-| File | Responsibility |
-| :--- | :--- |
-| [`src/main.rs`](src/main.rs) | Raw terminal setup/teardown, `tokio::select!` event loop (50ms tick, `EventStream`, `api_rx`). |
-| [`src/app.rs`](src/app.rs) | `App` state, modal routing, key/mouse handlers, 100-entry undo/redo stack, 30s auto-sync timer, `PomodoroState` (`Pomodoro`, `Flowtime`, `Countdown`), Worklog & Reschedule state. |
-| [`src/ui.rs`](src/ui.rs) | Layout splits (sidebar, task list, inspector/details, status bar) and overlays (Add Task, Properties dropdown, Reschedule calendar, Focus Timer, History, Counters, Theme Editor + 2D Color Picker, `:h` Help). |
-| [`src/api.rs`](src/api.rs) | `SuperProductivityClient` HTTP methods (`health`, `list_projects`, `list_tags`, `list_tasks`, `create_task`, `update_task`, `delete_task`, `toggle_task_done`, `start_tracking`, `stop_tracking`, counters/entity fallbacks). |
-| [`src/models.rs`](src/models.rs) | Serde models (`Task`, `Project`, `Tag`, `SimpleCounter`, `CreateTaskPayload`, `ApiResponse`, hex color helpers). |
-| [`src/short_syntax.rs`](src/short_syntax.rs) | Token parser for `+project`, `#tag`, `t<duration>[/<estimate>]`, `@due`, `!deadline`, compound duration parser (`1h5m3s`, `2d`), and floating autocomplete extraction. |
-| [`src/keybinds.rs`](src/keybinds.rs) | Sectioned `KeybindEntry` registry for `:h`, `KeybindSequenceBuffer` (`jk` to Esc, `gg` sequence), and mode filtering (`Both`, `NVIM`, `Normal`). |
-| [`src/theme.rs`](src/theme.rs) | `ThemeConfig`, 21 built-in presets (including `AMOLED`), HSV/RGB 2D map math (`map_coords_to_rgb`, `rgb_to_map_coords`, `parse_rgb`, `format_hex`). |
-| [`src/config.rs`](src/config.rs) | TOML persistence (`AppConfig::load`, `AppConfig::save`) under the OS config directory (`super-productivity-tui/config.toml`). |
+| File                                         | Responsibility                                                                                                                                                                                                                |
+| :------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`src/main.rs`](src/main.rs)                 | Raw terminal setup/teardown, `tokio::select!` event loop (50ms tick, `EventStream`, `api_rx`).                                                                                                                                |
+| [`src/app.rs`](src/app.rs)                   | `App` state, modal routing, key/mouse handlers, 100-entry undo/redo stack, 30s auto-sync timer, `PomodoroState` (`Pomodoro`, `Flowtime`, `Countdown`), Worklog & Reschedule state.                                            |
+| [`src/ui.rs`](src/ui.rs)                     | Layout splits (sidebar, task list, inspector/details, status bar) and overlays (Add Task, Properties dropdown, Reschedule calendar, Focus Timer, History, Counters, Theme Editor + 2D Color Picker, `:h` Help).               |
+| [`src/api.rs`](src/api.rs)                   | `SuperProductivityClient` HTTP methods (`health`, `list_projects`, `list_tags`, `list_tasks`, `create_task`, `update_task`, `delete_task`, `toggle_task_done`, `start_tracking`, `stop_tracking`, counters/entity fallbacks). |
+| [`src/models.rs`](src/models.rs)             | Serde models (`Task`, `Project`, `Tag`, `SimpleCounter`, `CreateTaskPayload`, `ApiResponse`, hex color helpers).                                                                                                              |
+| [`src/short_syntax.rs`](src/short_syntax.rs) | Token parser for `+project`, `#tag`, `t<duration>[/<estimate>]`, `@due`, `!deadline`, compound duration parser (`1h5m3s`, `2d`), and floating autocomplete extraction.                                                        |
+| [`src/keybinds.rs`](src/keybinds.rs)         | Sectioned `KeybindEntry` registry for `:h`, `KeybindSequenceBuffer` (`jk` to Esc, `gg` sequence), and mode filtering (`Both`, `NVIM`, `Normal`).                                                                              |
+| [`src/theme.rs`](src/theme.rs)               | `ThemeConfig`, 21 built-in presets (including `AMOLED`), HSV/RGB 2D map math (`map_coords_to_rgb`, `rgb_to_map_coords`, `parse_rgb`, `format_hex`).                                                                           |
+| [`src/config.rs`](src/config.rs)             | TOML persistence (`AppConfig::load`, `AppConfig::save`) under the OS config directory (`super-productivity-tui/config.toml`).                                                                                                 |
 
 ---
 
