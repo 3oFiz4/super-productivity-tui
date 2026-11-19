@@ -91,11 +91,44 @@ impl PomodoroPhase {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusMode {
+    #[default]
+    Pomodoro,
+    Flowtime,
+    Countdown,
+}
+
+impl FocusMode {
+    pub fn all() -> [Self; 3] {
+        [Self::Pomodoro, Self::Flowtime, Self::Countdown]
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Pomodoro => Self::Flowtime,
+            Self::Flowtime => Self::Countdown,
+            Self::Countdown => Self::Pomodoro,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pomodoro => "Pomodoro",
+            Self::Flowtime => "Flowtime",
+            Self::Countdown => "Countdown",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PomodoroState {
+    pub mode: FocusMode,
     pub running: bool,
     pub phase: PomodoroPhase,
     pub remaining_secs: u64,
+    pub elapsed_secs: u64,
+    pub countdown_mins: u64,
     pub last_tick: Option<Instant>,
     pub completed_sessions: u32,
     pub linked_task_id: Option<String>,
@@ -105,9 +138,12 @@ pub struct PomodoroState {
 impl Default for PomodoroState {
     fn default() -> Self {
         Self {
+            mode: FocusMode::Pomodoro,
             running: false,
             phase: PomodoroPhase::Focus,
             remaining_secs: PomodoroPhase::Focus.duration_secs(),
+            elapsed_secs: 0,
+            countdown_mins: 30,
             last_tick: None,
             completed_sessions: 0,
             linked_task_id: None,
@@ -671,6 +707,9 @@ pub struct App {
     pub properties_mode: PropertiesMode,
     pub properties_anchor: Option<(u16, u16)>,
     pub help_search: String,
+    pub help_scroll: usize,
+    pub help_search_focused: bool,
+    pub last_sync_at: Instant,
     pub settings_state: SettingsState,
     pub add_task_state: AddTaskState,
     pub add_entity_state: AddEntityState,
@@ -729,6 +768,9 @@ impl App {
             properties_mode: PropertiesMode::Menu,
             properties_anchor: None,
             help_search: String::new(),
+            help_scroll: 0,
+            help_search_focused: false,
+            last_sync_at: Instant::now(),
             settings_state,
             add_task_state: AddTaskState::default(),
             add_entity_state: AddEntityState::new(AddEntityKind::Project),
@@ -828,6 +870,7 @@ impl App {
                 self.current_task_id = current_task_id;
                 self.connected = connected;
                 self.status_message = message;
+                self.last_sync_at = Instant::now();
                 self.clamp_selections();
             }
             ApiEvent::CounterUpdated(updated) => {
@@ -1134,35 +1177,64 @@ impl App {
             && last.elapsed() >= Duration::from_secs(1)
         {
             self.pomodoro.last_tick = Some(Instant::now());
-            if self.pomodoro.remaining_secs > 0 {
-                self.pomodoro.remaining_secs -= 1;
-            }
-            if self.pomodoro.remaining_secs == 0 {
-                self.pomodoro.running = false;
-                match self.pomodoro.phase {
-                    PomodoroPhase::Focus => {
-                        self.pomodoro.completed_sessions += 1;
-                        let next_phase = if self.pomodoro.completed_sessions.is_multiple_of(4) {
-                            PomodoroPhase::LongBreak
-                        } else {
-                            PomodoroPhase::ShortBreak
-                        };
-                        self.pomodoro.phase = next_phase;
-                        self.pomodoro.remaining_secs = next_phase.duration_secs();
-                        self.pomodoro.reminder = Some(format!(
-                            "Focus complete! Time for a {} ({}m).",
-                            next_phase.label(),
-                            next_phase.duration_secs() / 60
-                        ));
-                    }
-                    PomodoroPhase::ShortBreak | PomodoroPhase::LongBreak => {
-                        self.pomodoro.phase = PomodoroPhase::Focus;
-                        self.pomodoro.remaining_secs = PomodoroPhase::Focus.duration_secs();
-                        self.pomodoro.reminder =
-                            Some("Break finished! Ready for next Focus session.".to_string());
+            if self.pomodoro.mode == FocusMode::Flowtime
+                && self.pomodoro.phase == PomodoroPhase::Focus
+            {
+                self.pomodoro.elapsed_secs += 1;
+            } else {
+                if self.pomodoro.remaining_secs > 0 {
+                    self.pomodoro.remaining_secs -= 1;
+                }
+                if self.pomodoro.remaining_secs == 0 {
+                    self.pomodoro.running = false;
+                    match self.pomodoro.mode {
+                        FocusMode::Countdown => {
+                            self.pomodoro.completed_sessions += 1;
+                            self.pomodoro.remaining_secs = self.pomodoro.countdown_mins * 60;
+                            self.pomodoro.reminder = Some("Countdown finished!".to_string());
+                        }
+                        FocusMode::Flowtime => {
+                            self.pomodoro.phase = PomodoroPhase::Focus;
+                            self.pomodoro.elapsed_secs = 0;
+                            self.pomodoro.reminder =
+                                Some("Flowtime break finished! Ready to focus.".to_string());
+                        }
+                        FocusMode::Pomodoro => match self.pomodoro.phase {
+                            PomodoroPhase::Focus => {
+                                self.pomodoro.completed_sessions += 1;
+                                let next_phase =
+                                    if self.pomodoro.completed_sessions.is_multiple_of(4) {
+                                        PomodoroPhase::LongBreak
+                                    } else {
+                                        PomodoroPhase::ShortBreak
+                                    };
+                                self.pomodoro.phase = next_phase;
+                                self.pomodoro.remaining_secs = next_phase.duration_secs();
+                                self.pomodoro.reminder = Some(format!(
+                                    "Focus complete! Time for a {} ({}m).",
+                                    next_phase.label(),
+                                    next_phase.duration_secs() / 60
+                                ));
+                            }
+                            PomodoroPhase::ShortBreak | PomodoroPhase::LongBreak => {
+                                self.pomodoro.phase = PomodoroPhase::Focus;
+                                self.pomodoro.remaining_secs = PomodoroPhase::Focus.duration_secs();
+                                self.pomodoro.reminder = Some(
+                                    "Break finished! Ready for next Focus session.".to_string(),
+                                );
+                            }
+                        },
                     }
                 }
             }
+        }
+        if self.connected
+            && self.active_modal == ActiveModal::None
+            && self.rename_target.is_none()
+            && self.last_sync_at.elapsed() >= Duration::from_secs(30)
+        {
+            self.last_sync_at = Instant::now();
+            self.refresh_all();
         }
     }
 
@@ -1335,6 +1407,8 @@ impl App {
                     (':', 'h') => {
                         self.sequence.clear();
                         self.help_search.clear();
+                        self.help_scroll = 0;
+                        self.help_search_focused = false;
                         self.active_modal = ActiveModal::Help;
                         return;
                     }
@@ -1411,6 +1485,10 @@ impl App {
 
             match ch {
                 'q' => self.should_quit = true,
+                'S' => {
+                    self.status_message = "Syncing...".to_string();
+                    self.refresh_all();
+                }
                 'H' => {
                     self.history_state.scroll = 0;
                     self.active_modal = ActiveModal::History;
@@ -1646,6 +1724,8 @@ impl App {
                         }
                         NavItemKind::Help => {
                             self.help_search.clear();
+                            self.help_scroll = 0;
+                            self.help_search_focused = false;
                             self.active_modal = ActiveModal::Help;
                         }
                         NavItemKind::Settings => {
@@ -2318,12 +2398,41 @@ impl App {
     }
 
     fn handle_help_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.active_modal = ActiveModal::None,
-            KeyCode::Backspace => {
-                self.help_search.pop();
+        if self.help_search_focused {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => {
+                    self.help_search_focused = false;
+                }
+                KeyCode::Backspace => {
+                    self.help_search.pop();
+                    self.help_scroll = 0;
+                }
+                KeyCode::Char(c) => {
+                    self.help_search.push(c);
+                    self.help_scroll = 0;
+                }
+                _ => {}
             }
-            KeyCode::Char(c) => self.help_search.push(c),
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.active_modal = ActiveModal::None,
+            KeyCode::Char('/') | KeyCode::Char('i') => {
+                self.help_search_focused = true;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.help_scroll = self.help_scroll.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('g') | KeyCode::Char('h') => {
+                self.help_scroll = 0;
+            }
+            KeyCode::Char('G') | KeyCode::Char('l') => {
+                self.help_scroll = usize::MAX;
+            }
             _ => {}
         }
     }
@@ -3173,22 +3282,71 @@ impl App {
                     self.pomodoro.last_tick = None;
                 }
             }
+            KeyCode::Char('m') | KeyCode::Tab => {
+                self.pomodoro.running = false;
+                self.pomodoro.last_tick = None;
+                self.pomodoro.reminder = None;
+                self.pomodoro.mode = self.pomodoro.mode.next();
+                self.pomodoro.phase = PomodoroPhase::Focus;
+                self.pomodoro.elapsed_secs = 0;
+                self.pomodoro.remaining_secs = match self.pomodoro.mode {
+                    FocusMode::Pomodoro => PomodoroPhase::Focus.duration_secs(),
+                    FocusMode::Flowtime => 0,
+                    FocusMode::Countdown => self.pomodoro.countdown_mins * 60,
+                };
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right | KeyCode::Char('l')
+                if !self.pomodoro.running && self.pomodoro.mode == FocusMode::Countdown =>
+            {
+                self.pomodoro.countdown_mins = (self.pomodoro.countdown_mins + 5).min(180);
+                self.pomodoro.remaining_secs = self.pomodoro.countdown_mins * 60;
+            }
+            KeyCode::Char('-') | KeyCode::Left | KeyCode::Char('h')
+                if !self.pomodoro.running && self.pomodoro.mode == FocusMode::Countdown =>
+            {
+                self.pomodoro.countdown_mins =
+                    self.pomodoro.countdown_mins.saturating_sub(5).max(5);
+                self.pomodoro.remaining_secs = self.pomodoro.countdown_mins * 60;
+            }
             KeyCode::Char('r') => {
                 self.pomodoro.running = false;
                 self.pomodoro.last_tick = None;
                 self.pomodoro.reminder = None;
-                self.pomodoro.remaining_secs = self.pomodoro.phase.duration_secs();
+                self.pomodoro.elapsed_secs = 0;
+                self.pomodoro.remaining_secs = match self.pomodoro.mode {
+                    FocusMode::Pomodoro => self.pomodoro.phase.duration_secs(),
+                    FocusMode::Flowtime => 0,
+                    FocusMode::Countdown => self.pomodoro.countdown_mins * 60,
+                };
             }
             KeyCode::Char('n') => {
                 self.pomodoro.running = false;
                 self.pomodoro.last_tick = None;
                 self.pomodoro.reminder = None;
-                self.pomodoro.phase = match self.pomodoro.phase {
-                    PomodoroPhase::Focus => PomodoroPhase::ShortBreak,
-                    PomodoroPhase::ShortBreak => PomodoroPhase::LongBreak,
-                    PomodoroPhase::LongBreak => PomodoroPhase::Focus,
-                };
-                self.pomodoro.remaining_secs = self.pomodoro.phase.duration_secs();
+                match self.pomodoro.mode {
+                    FocusMode::Pomodoro => {
+                        self.pomodoro.phase = match self.pomodoro.phase {
+                            PomodoroPhase::Focus => PomodoroPhase::ShortBreak,
+                            PomodoroPhase::ShortBreak => PomodoroPhase::LongBreak,
+                            PomodoroPhase::LongBreak => PomodoroPhase::Focus,
+                        };
+                        self.pomodoro.remaining_secs = self.pomodoro.phase.duration_secs();
+                    }
+                    FocusMode::Flowtime => {
+                        if self.pomodoro.phase == PomodoroPhase::Focus {
+                            let earned_break = (self.pomodoro.elapsed_secs / 5).max(60);
+                            self.pomodoro.completed_sessions += 1;
+                            self.pomodoro.phase = PomodoroPhase::ShortBreak;
+                            self.pomodoro.remaining_secs = earned_break;
+                        } else {
+                            self.pomodoro.phase = PomodoroPhase::Focus;
+                            self.pomodoro.elapsed_secs = 0;
+                        }
+                    }
+                    FocusMode::Countdown => {
+                        self.pomodoro.remaining_secs = self.pomodoro.countdown_mins * 60;
+                    }
+                }
             }
             KeyCode::Char('l') => {
                 if let Some(t) = self.selected_task() {

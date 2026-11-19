@@ -1,7 +1,7 @@
 use crate::app::{
-    ActiveModal, AddEntityField, AddEntityKind, AddTaskField, App, CompletionKind, FocusSection,
-    HistoryTab, HistoryTimeframe, NavFilter, NavItemKind, PropertiesMode, PropertiesTarget,
-    SettingsField, ThemeEditorState, ThemePickerFocus,
+    ActiveModal, AddEntityField, AddEntityKind, AddTaskField, App, CompletionKind, FocusMode,
+    FocusSection, HistoryTab, HistoryTimeframe, NavFilter, NavItemKind, PomodoroPhase,
+    PropertiesMode, PropertiesTarget, SettingsField, ThemeEditorState, ThemePickerFocus,
 };
 use crate::config::KeybindMode;
 use crate::keybinds::all_keybinds;
@@ -573,11 +573,19 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     if app.pomodoro.running || app.pomodoro.reminder.is_some() {
-        let m = app.pomodoro.remaining_secs / 60;
-        let s = app.pomodoro.remaining_secs % 60;
+        let display_secs = if app.pomodoro.mode == FocusMode::Flowtime
+            && app.pomodoro.phase == PomodoroPhase::Focus
+        {
+            app.pomodoro.elapsed_secs
+        } else {
+            app.pomodoro.remaining_secs
+        };
+        let m = display_secs / 60;
+        let s = display_secs % 60;
         spans.push(Span::styled(
             format!(
-                " \u{f017} {} {:02}:{:02} ",
+                " \u{f017} {} {} {:02}:{:02} ",
+                app.pomodoro.mode.label(),
                 app.pomodoro.phase.label(),
                 m,
                 s
@@ -743,7 +751,7 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(76, 22, area);
+    let popup = centered_rect(76, 24, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -759,32 +767,37 @@ fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
     let nvim_active = app.config.keybind_mode.is_nvim_active();
     let fg = app.config.theme.fg_color();
     let success = app.config.theme.success_color();
+    let accent = app.config.theme.accent_color();
+    let muted = app.config.theme.muted_color();
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "Search: ",
-                Style::default().fg(app.config.theme.warning_color()),
-            ),
-            Span::styled(format!("{}_", app.help_search), Style::default().fg(fg)),
-        ]),
-        Line::from(""),
-    ];
+    let mut body_lines: Vec<Line<'static>> = Vec::new();
+    let mut current_section = "";
 
     for entry in all_keybinds() {
         for key_str in entry.display_keys(app.config.keybind_mode) {
             if !query.is_empty()
                 && !key_str.to_lowercase().contains(&query)
                 && !entry.description.to_lowercase().contains(&query)
+                && !entry.section.to_lowercase().contains(&query)
             {
                 continue;
+            }
+            if entry.section != current_section {
+                if !body_lines.is_empty() {
+                    body_lines.push(Line::from(""));
+                }
+                current_section = entry.section;
+                body_lines.push(Line::from(Span::styled(
+                    format!("--- {current_section} ---"),
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                )));
             }
             let key_color = if entry.is_nvim_highlight && nvim_active {
                 success
             } else {
                 fg
             };
-            lines.push(Line::from(vec![
+            body_lines.push(Line::from(vec![
                 Span::styled(
                     format!("{key_str:<24}"),
                     Style::default().fg(key_color).add_modifier(Modifier::BOLD),
@@ -793,6 +806,46 @@ fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
             ]));
         }
     }
+
+    let max_body = (inner.height as usize).saturating_sub(4).max(1);
+    let max_scroll = body_lines.len().saturating_sub(max_body);
+    let skip = app.help_scroll.min(max_scroll);
+
+    let search_cursor = if app.help_search_focused { "_" } else { "" };
+    let search_label_color = if app.help_search_focused {
+        success
+    } else {
+        app.config.theme.warning_color()
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                if app.help_search_focused {
+                    "Search (typing): "
+                } else {
+                    "Search (/): "
+                },
+                Style::default().fg(search_label_color),
+            ),
+            Span::styled(
+                format!("{}{search_cursor}", app.help_search),
+                Style::default().fg(fg),
+            ),
+        ]),
+        Line::from(""),
+    ];
+
+    lines.extend(body_lines.into_iter().skip(skip).take(max_body));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        if app.help_search_focused {
+            "Type to filter | Enter/Esc: done searching"
+        } else {
+            "j/k/g/G: scroll | /: search | Esc/q: close"
+        },
+        Style::default().fg(muted),
+    )));
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
@@ -870,7 +923,7 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_add_task_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(72, 22, area);
+    let popup = centered_rect(74, 24, area);
     frame.render_widget(Clear, popup);
 
     let title_label = if app.add_task_state.parent_id.is_some() {
@@ -998,6 +1051,10 @@ fn render_add_task_modal(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Tip: Use +project, #tag, t1h5m3s, @due, !deadline directly in Title for quick entry.",
+        Style::default().fg(app.config.theme.warning_color()),
+    )));
     lines.push(Line::from(Span::styled(
         "Tab: field | Left/Right/Space: select | Enter: create | Esc: cancel",
         Style::default().fg(muted),
@@ -1758,11 +1815,11 @@ fn render_counters_modal(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_pomodoro_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(58, 15, area);
+    let popup = centered_rect(64, 17, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .title(" Pomodoro / Focus Mode (:p / P) ")
+        .title(" Focus Timer (:p / P) ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.config.theme.border_color()))
         .padding(Padding::uniform(1));
@@ -1770,19 +1827,66 @@ fn render_pomodoro_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, popup);
 
     let p = &app.pomodoro;
-    let total = p.phase.duration_secs().max(1);
-    let elapsed = total.saturating_sub(p.remaining_secs);
-    let ratio = (elapsed as f64 / total as f64).clamp(0.0, 1.0);
-    let bar_w = (inner.width as usize).saturating_sub(4).min(36);
-    let filled = ((bar_w as f64) * ratio).round() as usize;
-    let bar = format!(
-        "{}{}",
-        "█".repeat(filled),
-        "░".repeat(bar_w.saturating_sub(filled))
-    );
+    let accent = app.config.theme.accent_color();
+    let fg = app.config.theme.fg_color();
+    let muted = app.config.theme.muted_color();
+    let success = app.config.theme.success_color();
+    let warning = app.config.theme.warning_color();
 
-    let mins = p.remaining_secs / 60;
-    let secs = p.remaining_secs % 60;
+    let mode_tabs: Vec<Span<'static>> = FocusMode::all()
+        .iter()
+        .enumerate()
+        .flat_map(|(i, m)| {
+            let active = *m == p.mode;
+            let style = if active {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(muted)
+            };
+            let mut v = Vec::new();
+            if i > 0 {
+                v.push(Span::styled("  ", Style::default().fg(muted)));
+            }
+            v.push(Span::styled(format!(" {} ", m.label()), style));
+            v
+        })
+        .collect();
+
+    let is_flowtime_focus = p.mode == FocusMode::Flowtime && p.phase == PomodoroPhase::Focus;
+    let display_secs = if is_flowtime_focus {
+        p.elapsed_secs
+    } else {
+        p.remaining_secs
+    };
+    let mins = display_secs / 60;
+    let secs = display_secs % 60;
+
+    let bar_w = (inner.width as usize).saturating_sub(4).min(36);
+    let bar = if is_flowtime_focus {
+        let pulse = (p.elapsed_secs as usize) % bar_w.max(1);
+        (0..bar_w)
+            .map(|i| if i <= pulse { '█' } else { '░' })
+            .collect::<String>()
+    } else {
+        let total = match p.mode {
+            FocusMode::Pomodoro => p.phase.duration_secs(),
+            FocusMode::Flowtime => p.elapsed_secs.max(60),
+            FocusMode::Countdown => p.countdown_mins * 60,
+        }
+        .max(1);
+        let elapsed = total.saturating_sub(p.remaining_secs);
+        let ratio = (elapsed as f64 / total as f64).clamp(0.0, 1.0);
+        let filled = ((bar_w as f64) * ratio).round() as usize;
+        format!(
+            "{}{}",
+            "█".repeat(filled),
+            "░".repeat(bar_w.saturating_sub(filled))
+        )
+    };
+
     let linked_title = p
         .linked_task_id
         .as_ref()
@@ -1790,13 +1894,21 @@ fn render_pomodoro_modal(frame: &mut Frame, app: &App, area: Rect) {
         .map(|t| t.title.as_str())
         .unwrap_or("(No task linked — press l to link selected)");
 
-    let accent = app.config.theme.accent_color();
-    let fg = app.config.theme.fg_color();
-    let muted = app.config.theme.muted_color();
-    let success = app.config.theme.success_color();
-    let warning = app.config.theme.warning_color();
+    let extra_info = match p.mode {
+        FocusMode::Pomodoro => format!("(Sessions: {})", p.completed_sessions),
+        FocusMode::Flowtime => {
+            if is_flowtime_focus {
+                format!("(Earned break: {}m)", (p.elapsed_secs / 300).max(1))
+            } else {
+                "(Earned break)".to_string()
+            }
+        }
+        FocusMode::Countdown => format!("(Target: {}m, +/- to adjust)", p.countdown_mins),
+    };
 
     let mut lines = vec![
+        Line::from(mode_tabs),
+        Line::from(""),
         Line::from(vec![
             Span::styled(
                 format!(" {} ", p.phase.label()),
@@ -1806,10 +1918,7 @@ fn render_pomodoro_modal(frame: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(
-                    "   {:02}:{:02}   (Sessions: {})",
-                    mins, secs, p.completed_sessions
-                ),
+                format!("   {:02}:{:02}   {}", mins, secs, extra_info),
                 Style::default().fg(fg).add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -1832,7 +1941,7 @@ fn render_pomodoro_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Space: start/pause | r: reset | n: next phase | l: link task | Esc: hide",
+        "Space: start/pause | m/Tab: mode | +/-: mins | r: reset | n: next | l: link | Esc: hide",
         Style::default().fg(muted),
     )));
 
