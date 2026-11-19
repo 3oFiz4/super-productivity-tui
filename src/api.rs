@@ -133,4 +133,60 @@ impl SuperProductivityClient {
             Err(anyhow!("Failed to delete task"))
         }
     }
+
+    pub async fn rename_project(&self, id: &str, title: &str) -> Result<Project> {
+        let resp = self
+            .http
+            .patch(self.url(&format!("/projects/{id}")))
+            .bearer_auth(&self.token)
+            .json(&json!({ "title": title }))
+            .send()
+            .await?;
+        Self::parse_response(resp).await
+    }
+
+    pub async fn delete_project(&self, id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(self.url(&format!("/projects/{id}")))
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        let parsed: ApiResponse<serde_json::Value> = resp.json().await?;
+        if parsed.ok {
+            Ok(())
+        } else if let Some(err) = parsed.error {
+            Err(anyhow!("{}: {}", err.code, err.message))
+        } else {
+            Err(anyhow!("Failed to delete project"))
+        }
+    }
+
+    pub async fn rename_tag(&self, id: &str, title: &str) -> Result<Tag> {
+        let resp = self
+            .http
+            .patch(self.url(&format!("/tags/{id}")))
+            .bearer_auth(&self.token)
+            .json(&json!({ "title": title }))
+            .send()
+            .await?;
+        Self::parse_response(resp).await
+    }
+
+    pub async fn delete_tag(&self, id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(self.url(&format!("/tags/{id}")))
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        let parsed: ApiResponse<serde_json::Value> = resp.json().await?;
+        if parsed.ok {
+            Ok(())
+        } else if let Some(err) = parsed.error {
+            Err(anyhow!("{}: {}", err.code, err.message))
+        } else {
+            Err(anyhow!("Failed to delete tag"))
+        }
+    }
 }

@@ -1,3 +1,4 @@
+use crate::theme::ThemeConfig;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -44,6 +45,10 @@ pub struct AppConfig {
     pub api_token: String,
     pub keybind_mode: KeybindMode,
     pub hint_keybind: bool,
+    #[serde(default)]
+    pub theme: ThemeConfig,
+    #[serde(default)]
+    pub saved_themes: Vec<ThemeConfig>,
 }
 
 impl Default for AppConfig {
@@ -53,6 +58,8 @@ impl Default for AppConfig {
             api_token: String::new(),
             keybind_mode: KeybindMode::Both,
             hint_keybind: true,
+            theme: ThemeConfig::default(),
+            saved_themes: Vec::new(),
         }
     }
 }
