@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "Ratatui TUI client for Super Productivity Local REST API"
 
+[[bin]]
+name = "spt"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0"
 chrono = "0.4"

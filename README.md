@@ -1,8 +1,8 @@
 # Super Productivity TUI
 
-A fast, keyboard-first terminal client for **Super Productivity**, built in Rust with `ratatui` and connected to Super Productivity's Local REST API.
+A crazy fast vim-supported terminal client for **Super Productivity**, made in Rust (ratatui) and connected to Super Productivity's Local REST API.
 
-Manage your tasks, subtasks, projects, tags, deadlines, focus sessions, daily habits, worklogs, and terminal colorschemes without leaving your terminal.
+Manage your tasks, subtasks, projects, tags, deadlines, focus sessions, daily habits, worklogs, and terminal colorschemes without having to open super-productivity EVER...
 
 ---
 
@@ -57,13 +57,13 @@ Or install the binary locally:
 
 ```bash
 cargo install --path .
-super-productivity-tui
+spt
 ```
 
 ### Configuration
 
 1. Open Super Productivity and enable the **Local REST API** + copy your Bearer token.
-2. Launch `super-productivity-tui` and press `:s` (or click Settings in the sidebar) to enter:
+2. Launch `spt` and press `:s` (or click Settings in the sidebar) to enter:
    - **API URL** (default: `http://127.0.0.1:3876`)
    - **API Token**
    - **Keybind Mode** (`Both`, `NVIM`, or `Normal`)
@@ -78,27 +78,27 @@ super-productivity-tui
 
 Press `:h` inside the app for the searchable, sectioned keybind manual (`j`/`k`/`g`/`G` to scroll, `/` to search).
 
-| Context | Key | Action |
-| :--- | :--- | :--- |
-| **Movement** | `j` / `k` / `h` / `l` / Arrows | Move cursor / switch panels / open dropdown |
-| | `gg` / `G` | Jump to top / bottom of current list |
-| **Tasks** | `Space` | Toggle task or subtask completion |
-| | `a` | Add task (or add Project/Tag when sidebar is focused) |
-| | `o` / `l` | Open context properties dropdown |
-| | `O` / `L` | Quick actions (in sidebar: add Project/Tag; in tasks: details) |
-| | `/` | Live fuzzy task search |
-| | `Shift+N` | Toggle full task notes viewer |
-| | `x` / `Delete` | Delete selected task |
-| **Undo / Redo** | `u` | Undo last task operation (up to 100 steps) |
-| | `Ctrl+R` (or `U`/`r` in Normal) | Redo undone task operation |
-| **Views & Timers** | `:p` / `P` | Open Focus Timer (`m`/`Tab` mode, `+/-` mins, `Space` play/pause, `l` link task) |
-| | `:hist` | Open Worklog / History view |
-| | `:cnt` | Open Counters & Habits view |
-| | `:c` | Open Theme / Colorscheme editor & color picker |
-| **System** | `S` | Sync now with Super Productivity |
-| | `:s` | Open Settings |
-| | `:h` | Open Help / Keybinds manual |
-| | `q` / `:q` | Quit |
+| Context            | Key                             | Action                                                                           |
+| :----------------- | :------------------------------ | :------------------------------------------------------------------------------- |
+| **Movement**       | `j` / `k` / `h` / `l` / Arrows  | Move cursor / switch panels / open dropdown                                      |
+|                    | `gg` / `G`                      | Jump to top / bottom of current list                                             |
+| **Tasks**          | `Space`                         | Toggle task or subtask completion                                                |
+|                    | `a`                             | Add task (or add Project/Tag when sidebar is focused)                            |
+|                    | `o` / `l`                       | Open context properties dropdown                                                 |
+|                    | `O` / `L`                       | Quick actions (in sidebar: add Project/Tag; in tasks: details)                   |
+|                    | `/`                             | Live fuzzy task search                                                           |
+|                    | `Shift+N`                       | Toggle full task notes viewer                                                    |
+|                    | `x` / `Delete`                  | Delete selected task                                                             |
+| **Undo / Redo**    | `u`                             | Undo last task operation (up to 100 steps)                                       |
+|                    | `Ctrl+R` (or `U`/`r` in Normal) | Redo undone task operation                                                       |
+| **Views & Timers** | `:p` / `P`                      | Open Focus Timer (`m`/`Tab` mode, `+/-` mins, `Space` play/pause, `l` link task) |
+|                    | `:hist`                         | Open Worklog / History view                                                      |
+|                    | `:cnt`                          | Open Counters & Habits view                                                      |
+|                    | `:c`                            | Open Theme / Colorscheme editor & color picker                                   |
+| **System**         | `S`                             | Sync now with Super Productivity                                                 |
+|                    | `:s`                            | Open Settings                                                                    |
+|                    | `:h`                            | Open Help / Keybinds manual                                                      |
+|                    | `q` / `:q`                      | Quit                                                                             |
 
 ---
 
