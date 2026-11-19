@@ -612,3 +612,42 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn hint_spans_underlines_first_letter_of_each_word() {
+        let spans = hint_spans("abc def", true, Style::default());
+        assert_eq!(spans[0].content, "a");
+        assert!(spans[0].style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(spans[1].content, "bc ");
+        assert_eq!(spans[2].content, "d");
+        assert!(spans[2].style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(spans[3].content, "ef");
+    }
+
+    #[test]
+    fn renders_main_and_modals_without_panic() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        for modal in [
+            ActiveModal::None,
+            ActiveModal::Properties,
+            ActiveModal::Help,
+            ActiveModal::Settings,
+            ActiveModal::AddTask,
+        ] {
+            app.active_modal = modal;
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+        }
+    }
+}

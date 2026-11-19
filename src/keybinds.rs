@@ -185,3 +185,29 @@ pub enum JkResult {
     FlushJAndChar(char),
     Char(char),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jk_sequence_escapes_in_order() {
+        let mut tracker = JkEscapeTracker::default();
+        assert_eq!(tracker.on_char('j'), JkResult::HoldJ);
+        assert_eq!(tracker.on_char('k'), JkResult::Escaped);
+    }
+
+    #[test]
+    fn kj_does_not_escape() {
+        let mut tracker = JkEscapeTracker::default();
+        assert_eq!(tracker.on_char('k'), JkResult::Char('k'));
+        assert_eq!(tracker.on_char('j'), JkResult::HoldJ);
+    }
+
+    #[test]
+    fn j_followed_by_other_char_flushes() {
+        let mut tracker = JkEscapeTracker::default();
+        assert_eq!(tracker.on_char('j'), JkResult::HoldJ);
+        assert_eq!(tracker.on_char('a'), JkResult::FlushJAndChar('a'));
+    }
+}
