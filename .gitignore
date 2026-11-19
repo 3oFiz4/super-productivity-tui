@@ -1,0 +1,5 @@
+/target/
+chat_log/
+.env
+*.swp
+.DS_Store
