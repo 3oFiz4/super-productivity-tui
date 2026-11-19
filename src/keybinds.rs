@@ -10,15 +10,15 @@ pub struct KeybindEntry {
 }
 
 impl KeybindEntry {
-    pub fn display_key(&self, mode: KeybindMode) -> String {
+    pub fn display_keys(&self, mode: KeybindMode) -> Vec<&'static str> {
         match mode {
-            KeybindMode::Normal => self.normal.to_string(),
-            KeybindMode::Nvim => self.nvim.to_string(),
+            KeybindMode::Normal => vec![self.normal],
+            KeybindMode::Nvim => vec![self.nvim],
             KeybindMode::Both => {
                 if self.normal == self.nvim {
-                    self.normal.to_string()
+                    vec![self.normal]
                 } else {
-                    format!("{} / {}", self.normal, self.nvim)
+                    vec![self.normal, self.nvim]
                 }
             }
         }
@@ -28,21 +28,39 @@ impl KeybindEntry {
 pub fn all_keybinds() -> Vec<KeybindEntry> {
     vec![
         KeybindEntry {
-            normal: "Tab / Shift+Tab",
-            nvim: "Ctrl+h / Ctrl+l",
+            normal: "Tab",
+            nvim: "Ctrl+h",
             description: "Switch section (Sidebar / Main)",
             is_nvim_highlight: true,
         },
         KeybindEntry {
-            normal: "Up / Down",
-            nvim: "k / j",
-            description: "Move up / down in list",
+            normal: "Shift+Tab",
+            nvim: "Ctrl+l",
+            description: "Switch section reverse (Sidebar / Main)",
             is_nvim_highlight: true,
         },
         KeybindEntry {
-            normal: "ga / gn",
-            nvim: "ga / gn",
-            description: "Jump to Main area / Navigation",
+            normal: "Up",
+            nvim: "k",
+            description: "Move up in list",
+            is_nvim_highlight: true,
+        },
+        KeybindEntry {
+            normal: "Down",
+            nvim: "j",
+            description: "Move down in list",
+            is_nvim_highlight: true,
+        },
+        KeybindEntry {
+            normal: "ga",
+            nvim: "ga",
+            description: "Jump to Main area",
+            is_nvim_highlight: false,
+        },
+        KeybindEntry {
+            normal: "gn",
+            nvim: "gn",
+            description: "Jump to Navigation",
             is_nvim_highlight: false,
         },
         KeybindEntry {
@@ -58,14 +76,20 @@ pub fn all_keybinds() -> Vec<KeybindEntry> {
             is_nvim_highlight: true,
         },
         KeybindEntry {
-            normal: "p / Right-Click",
+            normal: "p",
             nvim: "O",
             description: "Open Properties menu (scoped focus)",
             is_nvim_highlight: true,
         },
         KeybindEntry {
+            normal: "Right-Click",
+            nvim: "Right-Click",
+            description: "Open Properties menu (scoped focus)",
+            is_nvim_highlight: false,
+        },
+        KeybindEntry {
             normal: "r (in Properties)",
-            nvim: "i / r (in Properties)",
+            nvim: "i",
             description: "Rename task inline (Enter or jk to save)",
             is_nvim_highlight: true,
         },

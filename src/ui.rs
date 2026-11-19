@@ -12,6 +12,32 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
+/// Underlines specific character indices when `hint` is enabled.
+pub fn hint_indices(text: &str, hint: bool, indices: &[usize], base: Style) -> Vec<Span<'static>> {
+    if !hint {
+        return vec![Span::styled(text.to_string(), base)];
+    }
+    let mut spans = Vec::new();
+    let mut buf = String::new();
+    for (i, ch) in text.chars().enumerate() {
+        if indices.contains(&i) {
+            if !buf.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut buf), base));
+            }
+            spans.push(Span::styled(
+                ch.to_string(),
+                base.add_modifier(Modifier::UNDERLINED),
+            ));
+        } else {
+            buf.push(ch);
+        }
+    }
+    if !buf.is_empty() {
+        spans.push(Span::styled(buf, base));
+    }
+    spans
+}
+
 /// Underlines the first character of each word when `hint` is enabled.
 pub fn hint_spans(text: &str, hint: bool, base: Style) -> Vec<Span<'static>> {
     if !hint {
@@ -485,8 +511,8 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
             " Task Properties ",
             vec![
                 Line::from(hint_spans("rename", hint, base)),
-                Line::from(hint_spans("schedule today", hint, base)),
-                Line::from(hint_spans("schedule tomorow", hint, base)),
+                Line::from(hint_indices("schedule today", hint, &[0, 11], base)),
+                Line::from(hint_indices("schedule tommorow", hint, &[0, 11], base)),
                 Line::from(hint_spans("schedule next week", hint, base)),
                 Line::from(hint_spans("unschedule", hint, base)),
                 Line::from(hint_spans("Reschedule", hint, base)),
@@ -549,25 +575,26 @@ fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
     ];
 
     for entry in all_keybinds() {
-        let key_str = entry.display_key(app.config.keybind_mode);
-        if !query.is_empty()
-            && !key_str.to_lowercase().contains(&query)
-            && !entry.description.to_lowercase().contains(&query)
-        {
-            continue;
+        for key_str in entry.display_keys(app.config.keybind_mode) {
+            if !query.is_empty()
+                && !key_str.to_lowercase().contains(&query)
+                && !entry.description.to_lowercase().contains(&query)
+            {
+                continue;
+            }
+            let key_color = if entry.is_nvim_highlight && nvim_active {
+                success
+            } else {
+                fg
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{key_str:<24}"),
+                    Style::default().fg(key_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(entry.description, Style::default().fg(fg)),
+            ]));
         }
-        let key_color = if entry.is_nvim_highlight && nvim_active {
-            success
-        } else {
-            fg
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{key_str:<24}"),
-                Style::default().fg(key_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(entry.description, Style::default().fg(fg)),
-        ]));
     }
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);

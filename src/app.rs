@@ -351,7 +351,7 @@ pub enum ApiEvent {
         message: String,
     },
     TaskUpdated(Task),
-    TaskCreated(Task, bool),
+    TaskCreated(Task, bool, bool),
     TaskDeleted(String),
     ProjectUpdated(Project),
     ProjectDeleted(String),
@@ -523,11 +523,13 @@ impl App {
                 }
                 self.status_message = "Task updated".to_string();
             }
-            ApiEvent::TaskCreated(created, to_top) => {
-                self.push_undo(UndoOp::CreateTask {
-                    task: created.clone(),
-                    to_top,
-                });
+            ApiEvent::TaskCreated(created, to_top, record_undo) => {
+                if record_undo {
+                    self.push_undo(UndoOp::CreateTask {
+                        task: created.clone(),
+                        to_top,
+                    });
+                }
                 if to_top {
                     self.tasks.insert(0, created);
                     self.task_selected = 0;
@@ -1151,7 +1153,6 @@ impl App {
             }
             UndoOp::DeleteTask { task, index } => {
                 let target = (*index).min(self.tasks.len());
-                self.tasks.insert(target, task.clone());
                 let payload = CreateTaskPayload {
                     title: task.title.clone(),
                     notes: task.notes.clone(),
@@ -1162,7 +1163,7 @@ impl App {
                     time_estimate: task.time_estimate,
                     is_add_to_top: Some(target == 0),
                 };
-                self.spawn_create(payload, target == 0);
+                self.spawn_create(payload, target == 0, false);
             }
             UndoOp::CreateTask { task, .. } => {
                 let id = task.id.clone();
@@ -1221,11 +1222,6 @@ impl App {
                 self.spawn_delete(id);
             }
             UndoOp::CreateTask { task, to_top } => {
-                if *to_top {
-                    self.tasks.insert(0, task.clone());
-                } else {
-                    self.tasks.push(task.clone());
-                }
                 let payload = CreateTaskPayload {
                     title: task.title.clone(),
                     notes: task.notes.clone(),
@@ -1236,7 +1232,7 @@ impl App {
                     time_estimate: task.time_estimate,
                     is_add_to_top: Some(*to_top),
                 };
-                self.spawn_create(payload, *to_top);
+                self.spawn_create(payload, *to_top, false);
             }
         }
         self.undo_stack.push(op);
@@ -1259,13 +1255,13 @@ impl App {
         });
     }
 
-    fn spawn_create(&self, payload: CreateTaskPayload, to_top: bool) {
+    fn spawn_create(&self, payload: CreateTaskPayload, to_top: bool, record_undo: bool) {
         let client = self.client.clone();
         let tx = self.api_tx.clone();
         tokio::spawn(async move {
             match client.create_task(payload).await {
                 Ok(t) => {
-                    let _ = tx.send(ApiEvent::TaskCreated(t, to_top));
+                    let _ = tx.send(ApiEvent::TaskCreated(t, to_top, record_undo));
                 }
                 Err(e) => {
                     let _ = tx.send(ApiEvent::Error(format!("Create failed: {e}")));
@@ -1487,7 +1483,7 @@ impl App {
                                 time_estimate: orig.time_estimate,
                                 is_add_to_top: Some(false),
                             };
-                            self.spawn_create(payload, false);
+                            self.spawn_create(payload, false, true);
                         }
                         self.active_modal = ActiveModal::None;
                     }
@@ -1887,7 +1883,7 @@ impl App {
                 tokio::spawn(async move {
                     match client.create_task(payload).await {
                         Ok(t) => {
-                            let _ = tx.send(ApiEvent::TaskCreated(t, to_top));
+                            let _ = tx.send(ApiEvent::TaskCreated(t, to_top, true));
                         }
                         Err(e) => {
                             let _ = tx.send(ApiEvent::Error(format!("Create failed: {e}")));
