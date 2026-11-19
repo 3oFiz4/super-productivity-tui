@@ -9,6 +9,7 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 use serde_json::json;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,12 +348,14 @@ pub enum ApiEvent {
         tasks: Vec<Task>,
         projects: Vec<Project>,
         tags: Vec<Tag>,
+        current_task_id: Option<String>,
         connected: bool,
         message: String,
     },
     TaskUpdated(Task),
     TaskCreated(Task, bool, bool),
     TaskDeleted(String),
+    CurrentTaskUpdated(Option<String>),
     ProjectUpdated(Project),
     ProjectDeleted(String),
     TagUpdated(Tag),
@@ -391,8 +394,14 @@ pub struct App {
     pub rename_target: Option<RenameTarget>,
     pub rename_buffer: String,
     pub jk_tracker: JkEscapeTracker,
+    pub prop_jk_tracker: JkEscapeTracker,
     pub sequence: SequenceState,
     pub prop_sequence: SequenceState,
+
+    pub current_task_id: Option<String>,
+    pub timer_started_at: Option<Instant>,
+    pub typed_key_display: String,
+    pub typed_key_at: Option<Instant>,
 
     pub active_modal: ActiveModal,
     pub properties_target: Option<PropertiesTarget>,
@@ -433,8 +442,13 @@ impl App {
             rename_target: None,
             rename_buffer: String::new(),
             jk_tracker: JkEscapeTracker::default(),
+            prop_jk_tracker: JkEscapeTracker::default(),
             sequence: SequenceState::default(),
             prop_sequence: SequenceState::default(),
+            current_task_id: None,
+            timer_started_at: None,
+            typed_key_display: String::new(),
+            typed_key_at: None,
             active_modal: ActiveModal::None,
             properties_target: None,
             properties_mode: PropertiesMode::Menu,
@@ -458,12 +472,15 @@ impl App {
                     let tasks = client.get_tasks().await;
                     let projects = client.get_projects().await.unwrap_or_default();
                     let tags = client.get_tags().await.unwrap_or_default();
+                    let current = client.get_current_task().await.ok().flatten();
+                    let current_task_id = current.map(|t| t.id);
                     match tasks {
                         Ok(tasks) => {
                             let _ = tx.send(ApiEvent::Loaded {
                                 tasks,
                                 projects,
                                 tags,
+                                current_task_id,
                                 connected: true,
                                 message: "Connected to Super Productivity".to_string(),
                             });
@@ -473,6 +490,7 @@ impl App {
                                 tasks: Vec::new(),
                                 projects,
                                 tags,
+                                current_task_id: None,
                                 connected: false,
                                 message: format!("API error: {e}"),
                             });
@@ -484,6 +502,7 @@ impl App {
                         tasks: Vec::new(),
                         projects: Vec::new(),
                         tags: Vec::new(),
+                        current_task_id: None,
                         connected: false,
                         message: format!("Server {} (ready={})", h.server, h.renderer_ready),
                     });
@@ -493,6 +512,7 @@ impl App {
                         tasks: Vec::new(),
                         projects: Vec::new(),
                         tags: Vec::new(),
+                        current_task_id: None,
                         connected: false,
                         message: format!("Offline: {e}"),
                     });
@@ -507,15 +527,22 @@ impl App {
                 tasks,
                 projects,
                 tags,
+                current_task_id,
                 connected,
                 message,
             } => {
                 self.tasks = tasks;
                 self.projects = projects;
                 self.tags = tags;
+                self.timer_started_at = current_task_id.as_ref().map(|_| Instant::now());
+                self.current_task_id = current_task_id;
                 self.connected = connected;
                 self.status_message = message;
                 self.clamp_selections();
+            }
+            ApiEvent::CurrentTaskUpdated(cid) => {
+                self.timer_started_at = cid.as_ref().map(|_| Instant::now());
+                self.current_task_id = cid;
             }
             ApiEvent::TaskUpdated(updated) => {
                 if let Some(t) = self.tasks.iter_mut().find(|t| t.id == updated.id) {
@@ -529,6 +556,8 @@ impl App {
                         task: created.clone(),
                         to_top,
                     });
+                } else if let Some(UndoOp::DeleteTask { task, .. }) = self.redo_stack.last_mut() {
+                    task.id = created.id.clone();
                 }
                 if to_top {
                     self.tasks.insert(0, created);
@@ -727,6 +756,41 @@ impl App {
         if self.rename_target.is_some() && self.jk_tracker.poll_expired() {
             self.rename_buffer.push('j');
         }
+        if self.active_modal == ActiveModal::Properties {
+            self.prop_jk_tracker.poll_expired();
+        }
+        if self.sequence.pending.is_none()
+            && let Some(at) = self.typed_key_at
+            && Instant::now().duration_since(at) > Duration::from_millis(1500)
+        {
+            self.typed_key_display.clear();
+            self.typed_key_at = None;
+        }
+    }
+
+    fn record_typed_key(&mut self, key: &KeyEvent) {
+        let label = match key.code {
+            KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                format!("<C-{c}>")
+            }
+            KeyCode::Char('\u{12}') => "<C-r>".to_string(),
+            KeyCode::Char(c) => {
+                if let Some((p, _)) = self.sequence.pending {
+                    format!("{p}{c}")
+                } else {
+                    c.to_string()
+                }
+            }
+            KeyCode::Enter => "<CR>".to_string(),
+            KeyCode::Tab => "<Tab>".to_string(),
+            KeyCode::BackTab => "<S-Tab>".to_string(),
+            KeyCode::Up => "<Up>".to_string(),
+            KeyCode::Down => "<Down>".to_string(),
+            KeyCode::Esc => "<Esc>".to_string(),
+            _ => return,
+        };
+        self.typed_key_display = label;
+        self.typed_key_at = Some(Instant::now());
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -763,8 +827,11 @@ impl App {
         }
 
         let mode = self.config.keybind_mode;
+        self.record_typed_key(&key);
 
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+        if (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r'))
+            || key.code == KeyCode::Char('\u{12}')
+        {
             if mode.is_nvim_active() {
                 self.sequence.clear();
                 self.redo();
@@ -876,6 +943,10 @@ impl App {
                 'j' if mode.is_nvim_active() => self.move_down(),
                 'k' if mode.is_nvim_active() => self.move_up(),
                 'o' if mode.is_nvim_active() => self.activate_selected(),
+                'l' if mode.is_nvim_active() && self.focus == FocusSection::Main => {
+                    self.activate_selected()
+                }
+                't' => self.toggle_timer(),
                 'p' if mode.is_normal_active() => self.open_properties(),
                 'O' if mode.is_nvim_active() => self.open_properties(),
                 'i' if mode.is_nvim_active() => self.start_rename_selected_task(),
@@ -887,7 +958,7 @@ impl App {
                 'n' if mode.is_normal_active() => self.show_note = !self.show_note,
                 'K' if mode.is_nvim_active() => self.show_note = !self.show_note,
                 'u' => self.undo(),
-                'U' if mode == KeybindMode::Normal => self.redo(),
+                'U' if mode.is_normal_active() => self.redo(),
                 _ => {}
             }
         }
@@ -1103,7 +1174,35 @@ impl App {
         }
     }
 
+    fn toggle_timer(&mut self) {
+        let Some(task) = self.selected_task().cloned() else {
+            return;
+        };
+        let next_id = if self.current_task_id.as_deref() == Some(task.id.as_str()) {
+            None
+        } else {
+            Some(task.id.clone())
+        };
+        self.timer_started_at = next_id.as_ref().map(|_| Instant::now());
+        self.current_task_id = next_id.clone();
+        let client = self.client.clone();
+        let tx = self.api_tx.clone();
+        tokio::spawn(async move {
+            match client.set_current_task(next_id.as_deref()).await {
+                Ok(()) => {
+                    let _ = tx.send(ApiEvent::CurrentTaskUpdated(next_id));
+                }
+                Err(e) => {
+                    let _ = tx.send(ApiEvent::Error(format!("Timer failed: {e}")));
+                }
+            }
+        });
+    }
+
     fn push_undo(&mut self, op: UndoOp) {
+        while self.undo_stack.len() >= 100 {
+            self.undo_stack.remove(0);
+        }
         self.undo_stack.push(op);
         self.redo_stack.clear();
     }
@@ -1330,6 +1429,7 @@ impl App {
 
         if key.code == KeyCode::Esc {
             self.prop_sequence.clear();
+            self.prop_jk_tracker = JkEscapeTracker::default();
             self.active_modal = ActiveModal::None;
             return;
         }
@@ -1341,6 +1441,12 @@ impl App {
         let KeyCode::Char(ch) = key.code else {
             return;
         };
+
+        if self.prop_jk_tracker.on_char(ch) == JkResult::Escaped {
+            self.prop_sequence.clear();
+            self.active_modal = ActiveModal::None;
+            return;
+        }
 
         match target {
             PropertiesTarget::Project(pid) => match ch {
@@ -2086,6 +2192,7 @@ mod tests {
             tag_ids: vec![],
             due_day: None,
             time_estimate: None,
+            time_spent: None,
             repeat_cfg_id: None,
         });
         app.push_undo(UndoOp::ToggleDone {
@@ -2098,5 +2205,31 @@ mod tests {
         assert!(!app.tasks[0].is_done);
         app.redo();
         assert!(app.tasks[0].is_done);
+    }
+
+    #[test]
+    fn undo_stack_is_capped_at_100() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        for i in 0..120 {
+            app.push_undo(UndoOp::ToggleDone {
+                id: format!("t{i}"),
+                prev_done: false,
+            });
+        }
+        assert_eq!(app.undo_stack.len(), 100);
+    }
+
+    #[test]
+    fn jk_closes_properties_modal() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        app.active_modal = ActiveModal::Properties;
+        app.properties_target = Some(PropertiesTarget::Task("t1".into()));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.active_modal, ActiveModal::Properties);
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.active_modal, ActiveModal::None);
     }
 }

@@ -21,6 +21,8 @@ pub struct Task {
     #[serde(default)]
     pub time_estimate: Option<u64>,
     #[serde(default)]
+    pub time_spent: Option<u64>,
+    #[serde(default)]
     pub repeat_cfg_id: Option<String>,
 }
 

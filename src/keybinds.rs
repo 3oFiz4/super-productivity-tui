@@ -76,6 +76,18 @@ pub fn all_keybinds() -> Vec<KeybindEntry> {
             is_nvim_highlight: true,
         },
         KeybindEntry {
+            normal: "Enter",
+            nvim: "l",
+            description: "Toggle task done (in task list)",
+            is_nvim_highlight: true,
+        },
+        KeybindEntry {
+            normal: "t",
+            nvim: "t",
+            description: "Start / stop timer on selected task",
+            is_nvim_highlight: false,
+        },
+        KeybindEntry {
             normal: "p",
             nvim: "O",
             description: "Open Properties menu (scoped focus)",

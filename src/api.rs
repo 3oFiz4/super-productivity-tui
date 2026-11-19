@@ -189,4 +189,37 @@ impl SuperProductivityClient {
             Err(anyhow!("Failed to delete tag"))
         }
     }
+
+    pub async fn get_current_task(&self) -> Result<Option<Task>> {
+        let resp = self
+            .http
+            .get(self.url("/task-control/current"))
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        let parsed: ApiResponse<Option<Task>> = resp.json().await?;
+        if parsed.ok {
+            Ok(parsed.data.flatten())
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn set_current_task(&self, task_id: Option<&str>) -> Result<()> {
+        let resp = self
+            .http
+            .post(self.url("/task-control/current"))
+            .bearer_auth(&self.token)
+            .json(&json!({ "taskId": task_id }))
+            .send()
+            .await?;
+        let parsed: ApiResponse<serde_json::Value> = resp.json().await?;
+        if parsed.ok {
+            Ok(())
+        } else if let Some(err) = parsed.error {
+            Err(anyhow!("{}: {}", err.code, err.message))
+        } else {
+            Err(anyhow!("Failed to update current task"))
+        }
+    }
 }

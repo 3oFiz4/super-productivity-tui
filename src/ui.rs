@@ -305,13 +305,27 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         );
 
         let checkbox = if task.is_done { "\u{f046}" } else { "\u{f096}" };
+        let is_tracking = app.current_task_id.as_deref() == Some(task.id.as_str());
+        let tracking_prefix = if is_tracking { "\u{f04b} " } else { "" };
         let title_text = if is_renaming {
             format!("{}|", app.rename_buffer)
         } else {
-            task.title.clone()
+            format!("{tracking_prefix}{}", task.title)
         };
 
         let mut meta_parts = Vec::new();
+        let spent = task.time_spent.unwrap_or(0);
+        let est = task.time_estimate.unwrap_or(0);
+        if spent > 0 || est > 0 {
+            meta_parts.push(Span::styled(
+                format!(" \u{f017} {}/{} ", format_ms(spent), format_ms(est)),
+                Style::default().fg(if is_tracking {
+                    app.config.theme.success_color()
+                } else {
+                    app.config.theme.muted_color()
+                }),
+            ));
+        }
         if let Some(due) = &task.due_day {
             let due_color = if due.as_str() < today_str.as_str() {
                 app.config.theme.danger_color()
@@ -403,12 +417,18 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let mode_label = if app.rename_target.is_some() {
-        "INSERT (jk/Enter to save)"
+fn format_ms(ms: u64) -> String {
+    let mins = ms / 60_000;
+    let h = mins / 60;
+    let m = mins % 60;
+    if h > 0 {
+        format!("{h}h{m:02}m")
     } else {
-        app.config.keybind_mode.label()
-    };
+        format!("{m}m")
+    }
+}
+
+fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let nav_toggle_hint = if app.config.keybind_mode == KeybindMode::Nvim {
         "zn: sidebar"
     } else {
@@ -419,23 +439,61 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         app.config.theme.danger_color()
     };
-    let line = Line::from(vec![
-        Span::styled(
-            format!(" [{mode_label}] "),
+
+    let mut spans = Vec::new();
+    if app.rename_target.is_some() {
+        spans.push(Span::styled(
+            " [INSERT (jk/Enter to save)] ",
             Style::default()
                 .fg(Color::Black)
                 .bg(app.config.theme.accent_color()),
-        ),
-        Span::styled(
-            format!(" {} ", app.status_message),
-            Style::default().fg(status_color),
-        ),
-        Span::styled(
-            format!(" | {nav_toggle_hint} | :h help | :s settings | :c theme "),
-            Style::default().fg(app.config.theme.muted_color()),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+        ));
+    }
+
+    if let Some(cid) = &app.current_task_id
+        && let Some(t) = app.tasks.iter().find(|t| &t.id == cid)
+    {
+        let secs = app
+            .timer_started_at
+            .map(|s| s.elapsed().as_secs())
+            .unwrap_or(0);
+        spans.push(Span::styled(
+            format!(" \u{f04b} {} ({:02}:{:02}) ", t.title, secs / 60, secs % 60),
+            Style::default()
+                .fg(Color::Black)
+                .bg(app.config.theme.success_color()),
+        ));
+    }
+
+    spans.push(Span::styled(
+        format!(" {} ", app.status_message),
+        Style::default().fg(status_color),
+    ));
+    spans.push(Span::styled(
+        format!(" | {nav_toggle_hint} | :h help | :s settings | :c theme "),
+        Style::default().fg(app.config.theme.muted_color()),
+    ));
+
+    let left_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let key_str = if app.typed_key_display.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", app.typed_key_display)
+    };
+    let pad = (area.width as usize).saturating_sub(left_len + key_str.chars().count());
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad)));
+    }
+    if !key_str.is_empty() {
+        spans.push(Span::styled(
+            key_str,
+            Style::default()
+                .fg(app.config.theme.warning_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
@@ -523,7 +581,7 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(hint_spans("move to project", hint, base)),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Type underlined shortcut | Esc to close",
+                    "Type underlined shortcut | Esc or jk to close",
                     Style::default().fg(app.config.theme.muted_color()),
                 )),
             ],
