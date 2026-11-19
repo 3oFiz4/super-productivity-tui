@@ -205,6 +205,28 @@ impl SuperProductivityClient {
         }
     }
 
+    pub async fn create_project(&self, title: &str, color: &str) -> Result<Project> {
+        let resp = self
+            .http
+            .post(self.url("/projects"))
+            .bearer_auth(&self.token)
+            .json(&json!({ "title": title, "theme": { "primary": color } }))
+            .send()
+            .await?;
+        Self::parse_response(resp).await
+    }
+
+    pub async fn create_tag(&self, title: &str, color: &str) -> Result<Tag> {
+        let resp = self
+            .http
+            .post(self.url("/tags"))
+            .bearer_auth(&self.token)
+            .json(&json!({ "title": title, "color": color }))
+            .send()
+            .await?;
+        Self::parse_response(resp).await
+    }
+
     pub async fn set_current_task(&self, task_id: Option<&str>) -> Result<()> {
         let resp = self
             .http

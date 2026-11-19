@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 pub struct ThemeConfig {
     pub name: String,
     pub bg: String,
+    #[serde(default = "default_sidebar_bg")]
+    pub sidebar_bg: String,
+    #[serde(default = "default_status_bg")]
+    pub status_bg: String,
     pub fg: String,
     pub accent: String,
     pub muted: String,
@@ -14,6 +18,14 @@ pub struct ThemeConfig {
     pub warning: String,
     pub danger: String,
     pub selection_bg: String,
+}
+
+fn default_sidebar_bg() -> String {
+    "#1e1e1e".to_string()
+}
+
+fn default_status_bg() -> String {
+    "#181818".to_string()
 }
 
 impl Default for ThemeConfig {
@@ -28,6 +40,8 @@ impl ThemeConfig {
             Self {
                 name: "Dark (Default)".to_string(),
                 bg: "#232323".to_string(),
+                sidebar_bg: "#1e1e1e".to_string(),
+                status_bg: "#181818".to_string(),
                 fg: "#e5e7eb".to_string(),
                 accent: "#22d3ee".to_string(),
                 muted: "#6b7280".to_string(),
@@ -40,6 +54,8 @@ impl ThemeConfig {
             Self {
                 name: "Catppuccin Mocha".to_string(),
                 bg: "#1e1e2e".to_string(),
+                sidebar_bg: "#181825".to_string(),
+                status_bg: "#11111b".to_string(),
                 fg: "#cdd6f4".to_string(),
                 accent: "#89b4fa".to_string(),
                 muted: "#6c7086".to_string(),
@@ -52,6 +68,8 @@ impl ThemeConfig {
             Self {
                 name: "Gruvbox Dark".to_string(),
                 bg: "#282828".to_string(),
+                sidebar_bg: "#1d2021".to_string(),
+                status_bg: "#1d2021".to_string(),
                 fg: "#ebdbb2".to_string(),
                 accent: "#83a598".to_string(),
                 muted: "#928374".to_string(),
@@ -64,6 +82,8 @@ impl ThemeConfig {
             Self {
                 name: "Tokyo Night".to_string(),
                 bg: "#1a1b26".to_string(),
+                sidebar_bg: "#16161e".to_string(),
+                status_bg: "#16161e".to_string(),
                 fg: "#c0caf5".to_string(),
                 accent: "#7aa2f7".to_string(),
                 muted: "#565f89".to_string(),
@@ -76,6 +96,8 @@ impl ThemeConfig {
             Self {
                 name: "Nord".to_string(),
                 bg: "#2e3440".to_string(),
+                sidebar_bg: "#272c36".to_string(),
+                status_bg: "#242933".to_string(),
                 fg: "#eceff4".to_string(),
                 accent: "#88c0d0".to_string(),
                 muted: "#616e88".to_string(),
@@ -90,6 +112,14 @@ impl ThemeConfig {
 
     pub fn bg_color(&self) -> Color {
         parse_hex_color(&self.bg).unwrap_or(Color::Reset)
+    }
+
+    pub fn sidebar_bg_color(&self) -> Color {
+        parse_hex_color(&self.sidebar_bg).unwrap_or_else(|| self.bg_color())
+    }
+
+    pub fn status_bg_color(&self) -> Color {
+        parse_hex_color(&self.status_bg).unwrap_or_else(|| self.bg_color())
     }
 
     pub fn fg_color(&self) -> Color {

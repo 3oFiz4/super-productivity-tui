@@ -76,10 +76,40 @@ pub fn all_keybinds() -> Vec<KeybindEntry> {
             is_nvim_highlight: true,
         },
         KeybindEntry {
+            normal: "gg / G",
+            nvim: "gg / G",
+            description: "Jump to top / bottom of list",
+            is_nvim_highlight: true,
+        },
+        KeybindEntry {
             normal: "Enter",
             nvim: "l",
-            description: "Toggle task done (in task list)",
+            description: "Toggle task done / open nav item",
             is_nvim_highlight: true,
+        },
+        KeybindEntry {
+            normal: "p",
+            nvim: "L",
+            description: "Open Properties (task / project / tag)",
+            is_nvim_highlight: true,
+        },
+        KeybindEntry {
+            normal: "s",
+            nvim: "s",
+            description: "Show / hide subtasks for selected task",
+            is_nvim_highlight: false,
+        },
+        KeybindEntry {
+            normal: "N",
+            nvim: "N",
+            description: "Open full Markdown note view",
+            is_nvim_highlight: false,
+        },
+        KeybindEntry {
+            normal: "/",
+            nvim: "/",
+            description: "Live fuzzy search tasks (title, project, tag)",
+            is_nvim_highlight: false,
         },
         KeybindEntry {
             normal: "t",

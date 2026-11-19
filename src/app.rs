@@ -9,6 +9,7 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 use serde_json::json;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -54,6 +55,43 @@ pub enum ActiveModal {
     Settings,
     AddTask,
     Theme,
+    FullNote,
+    AddEntity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddEntityKind {
+    Project,
+    Tag,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddEntityField {
+    Name,
+    Color,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddEntityState {
+    pub kind: AddEntityKind,
+    pub title: String,
+    pub color: String,
+    pub active_field: AddEntityField,
+}
+
+impl AddEntityState {
+    pub fn new(kind: AddEntityKind) -> Self {
+        Self {
+            kind,
+            title: String::new(),
+            color: if kind == AddEntityKind::Project {
+                "#89b4fa".to_string()
+            } else {
+                "#a6e3a1".to_string()
+            },
+            active_field: AddEntityField::Name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,9 +281,11 @@ pub struct ThemeEditorState {
 }
 
 impl ThemeEditorState {
-    pub const FIELD_LABELS: [&'static str; 10] = [
+    pub const FIELD_LABELS: [&'static str; 12] = [
         "Preset / Name",
         "Background (bg)",
+        "Sidebar Bg",
+        "Status Bg",
         "Foreground (fg)",
         "Accent",
         "Muted",
@@ -272,13 +312,15 @@ impl ThemeEditorState {
         match self.field_idx {
             0 => &mut self.editing.name,
             1 => &mut self.editing.bg,
-            2 => &mut self.editing.fg,
-            3 => &mut self.editing.accent,
-            4 => &mut self.editing.muted,
-            5 => &mut self.editing.border,
-            6 => &mut self.editing.success,
-            7 => &mut self.editing.warning,
-            8 => &mut self.editing.danger,
+            2 => &mut self.editing.sidebar_bg,
+            3 => &mut self.editing.status_bg,
+            4 => &mut self.editing.fg,
+            5 => &mut self.editing.accent,
+            6 => &mut self.editing.muted,
+            7 => &mut self.editing.border,
+            8 => &mut self.editing.success,
+            9 => &mut self.editing.warning,
+            10 => &mut self.editing.danger,
             _ => &mut self.editing.selection_bg,
         }
     }
@@ -287,13 +329,15 @@ impl ThemeEditorState {
         match idx {
             0 => &self.editing.name,
             1 => &self.editing.bg,
-            2 => &self.editing.fg,
-            3 => &self.editing.accent,
-            4 => &self.editing.muted,
-            5 => &self.editing.border,
-            6 => &self.editing.success,
-            7 => &self.editing.warning,
-            8 => &self.editing.danger,
+            2 => &self.editing.sidebar_bg,
+            3 => &self.editing.status_bg,
+            4 => &self.editing.fg,
+            5 => &self.editing.accent,
+            6 => &self.editing.muted,
+            7 => &self.editing.border,
+            8 => &self.editing.success,
+            9 => &self.editing.warning,
+            10 => &self.editing.danger,
             _ => &self.editing.selection_bg,
         }
     }
@@ -356,8 +400,10 @@ pub enum ApiEvent {
     TaskCreated(Task, bool, bool),
     TaskDeleted(String),
     CurrentTaskUpdated(Option<String>),
+    ProjectCreated(Project),
     ProjectUpdated(Project),
     ProjectDeleted(String),
+    TagCreated(Tag),
     TagUpdated(Tag),
     TagDeleted(String),
     Error(String),
@@ -391,6 +437,9 @@ pub struct App {
     pub status_message: String,
 
     pub show_note: bool,
+    pub expanded_subtasks: HashSet<String>,
+    pub search_active: bool,
+    pub search_query: String,
     pub rename_target: Option<RenameTarget>,
     pub rename_buffer: String,
     pub jk_tracker: JkEscapeTracker,
@@ -406,9 +455,11 @@ pub struct App {
     pub active_modal: ActiveModal,
     pub properties_target: Option<PropertiesTarget>,
     pub properties_mode: PropertiesMode,
+    pub properties_anchor: Option<(u16, u16)>,
     pub help_search: String,
     pub settings_state: SettingsState,
     pub add_task_state: AddTaskState,
+    pub add_entity_state: AddEntityState,
     pub theme_editor: Option<ThemeEditorState>,
 
     pub undo_stack: Vec<UndoOp>,
@@ -439,6 +490,9 @@ impl App {
             connected: false,
             status_message: "Connecting...".to_string(),
             show_note: false,
+            expanded_subtasks: HashSet::new(),
+            search_active: false,
+            search_query: String::new(),
             rename_target: None,
             rename_buffer: String::new(),
             jk_tracker: JkEscapeTracker::default(),
@@ -452,9 +506,11 @@ impl App {
             active_modal: ActiveModal::None,
             properties_target: None,
             properties_mode: PropertiesMode::Menu,
+            properties_anchor: None,
             help_search: String::new(),
             settings_state,
             add_task_state: AddTaskState::default(),
+            add_entity_state: AddEntityState::new(AddEntityKind::Project),
             theme_editor: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -573,6 +629,11 @@ impl App {
                 self.status_message = "Task deleted".to_string();
                 self.clamp_selections();
             }
+            ApiEvent::ProjectCreated(p) => {
+                self.projects.push(p);
+                self.status_message = "Project created".to_string();
+                self.clamp_selections();
+            }
             ApiEvent::ProjectUpdated(updated) => {
                 if let Some(p) = self.projects.iter_mut().find(|p| p.id == updated.id) {
                     *p = updated;
@@ -582,6 +643,11 @@ impl App {
             ApiEvent::ProjectDeleted(id) => {
                 self.projects.retain(|p| p.id != id);
                 self.status_message = "Project deleted".to_string();
+                self.clamp_selections();
+            }
+            ApiEvent::TagCreated(t) => {
+                self.tags.push(t);
+                self.status_message = "Tag created".to_string();
                 self.clamp_selections();
             }
             ApiEvent::TagUpdated(updated) => {
@@ -726,9 +792,37 @@ impl App {
     }
 
     pub fn filtered_tasks(&self) -> Vec<&Task> {
+        let q = self.search_query.trim().to_lowercase();
         self.tasks
             .iter()
-            .filter(|t| Self::matches_filter(t, &self.active_filter))
+            .filter(|t| t.parent_id.is_none() && Self::matches_filter(t, &self.active_filter))
+            .filter(|t| {
+                if q.is_empty() {
+                    return true;
+                }
+                if fuzzy_match(&t.title.to_lowercase(), &q) {
+                    return true;
+                }
+                if let Some(pid) = &t.project_id
+                    && let Some(p) = self.projects.iter().find(|p| &p.id == pid)
+                    && fuzzy_match(&p.title.to_lowercase(), &q)
+                {
+                    return true;
+                }
+                t.tag_ids.iter().any(|tid| {
+                    self.tags
+                        .iter()
+                        .find(|tg| &tg.id == tid)
+                        .is_some_and(|tg| fuzzy_match(&tg.title.to_lowercase(), &q))
+                })
+            })
+            .collect()
+    }
+
+    pub fn subtasks_for(&self, parent_id: &str) -> Vec<&Task> {
+        self.tasks
+            .iter()
+            .filter(|t| t.parent_id.as_deref() == Some(parent_id))
             .collect()
     }
 
@@ -823,7 +917,43 @@ impl App {
                 self.handle_theme_key(key);
                 return;
             }
+            ActiveModal::FullNote => {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('N') | KeyCode::Char('q')
+                ) {
+                    self.active_modal = ActiveModal::None;
+                }
+                return;
+            }
+            ActiveModal::AddEntity => {
+                self.handle_add_entity_key(key);
+                return;
+            }
             ActiveModal::None => {}
+        }
+
+        if self.search_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.search_active = false;
+                    self.search_query.clear();
+                    self.clamp_selections();
+                }
+                KeyCode::Enter => {
+                    self.search_active = false;
+                }
+                KeyCode::Backspace => {
+                    self.search_query.pop();
+                    self.clamp_selections();
+                }
+                KeyCode::Char(c) => {
+                    self.search_query.push(c);
+                    self.clamp_selections();
+                }
+                _ => {}
+            }
+            return;
         }
 
         let mode = self.config.keybind_mode;
@@ -903,6 +1033,11 @@ impl App {
                         self.active_modal = ActiveModal::Theme;
                         return;
                     }
+                    ('g', 'g') => {
+                        self.sequence.clear();
+                        self.move_to_top();
+                        return;
+                    }
                     ('g', 'a') => {
                         self.sequence.clear();
                         self.focus = FocusSection::Main;
@@ -940,20 +1075,25 @@ impl App {
 
             match ch {
                 'q' => self.should_quit = true,
+                'G' => self.move_to_bottom(),
                 'j' if mode.is_nvim_active() => self.move_down(),
                 'k' if mode.is_nvim_active() => self.move_up(),
                 'o' if mode.is_nvim_active() => self.activate_selected(),
-                'l' if mode.is_nvim_active() && self.focus == FocusSection::Main => {
-                    self.activate_selected()
-                }
+                'l' if mode.is_nvim_active() => self.activate_selected(),
                 't' => self.toggle_timer(),
-                'p' if mode.is_normal_active() => self.open_properties(),
-                'O' if mode.is_nvim_active() => self.open_properties(),
-                'i' if mode.is_nvim_active() => self.start_rename_selected_task(),
-                'a' => {
-                    self.add_task_state = AddTaskState::default();
-                    self.active_modal = ActiveModal::AddTask;
+                's' => self.toggle_subtasks(),
+                '/' => {
+                    self.search_active = true;
                 }
+                'N' => {
+                    if self.selected_task().is_some() {
+                        self.active_modal = ActiveModal::FullNote;
+                    }
+                }
+                'p' if mode.is_normal_active() => self.open_properties(),
+                'O' | 'L' if mode.is_nvim_active() => self.open_properties(),
+                'i' if mode.is_nvim_active() => self.start_rename_selected_task(),
+                'a' => self.handle_add_shortcut(),
                 'd' => self.delete_selected_task(),
                 'n' if mode.is_normal_active() => self.show_note = !self.show_note,
                 'K' if mode.is_nvim_active() => self.show_note = !self.show_note,
@@ -1060,6 +1200,58 @@ impl App {
         }
     }
 
+    fn move_to_top(&mut self) {
+        match self.focus {
+            FocusSection::Nav => self.nav_selected = 0,
+            FocusSection::Main => self.task_selected = 0,
+        }
+    }
+
+    fn move_to_bottom(&mut self) {
+        match self.focus {
+            FocusSection::Nav => {
+                self.nav_selected = self.all_nav_rows().len().saturating_sub(1);
+            }
+            FocusSection::Main => {
+                self.task_selected = self.filtered_tasks().len().saturating_sub(1);
+            }
+        }
+    }
+
+    fn toggle_subtasks(&mut self) {
+        if self.focus != FocusSection::Main {
+            return;
+        }
+        if let Some(t) = self.selected_task() {
+            let id = t.id.clone();
+            if !self.expanded_subtasks.remove(&id) {
+                self.expanded_subtasks.insert(id);
+            }
+        }
+    }
+
+    fn handle_add_shortcut(&mut self) {
+        if self.focus == FocusSection::Nav
+            && let Some(row) = self.all_nav_rows().get(self.nav_selected)
+        {
+            match &row.kind {
+                NavItemKind::ToggleProjects | NavItemKind::Filter(NavFilter::Project(_)) => {
+                    self.add_entity_state = AddEntityState::new(AddEntityKind::Project);
+                    self.active_modal = ActiveModal::AddEntity;
+                    return;
+                }
+                NavItemKind::ToggleTags | NavItemKind::Filter(NavFilter::Tag(_)) => {
+                    self.add_entity_state = AddEntityState::new(AddEntityKind::Tag);
+                    self.active_modal = ActiveModal::AddEntity;
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.add_task_state = AddTaskState::default();
+        self.active_modal = ActiveModal::AddTask;
+    }
+
     fn activate_selected(&mut self) {
         match self.focus {
             FocusSection::Nav => {
@@ -1115,23 +1307,38 @@ impl App {
 
     fn open_properties(&mut self) {
         self.prop_sequence.clear();
+        self.prop_jk_tracker = JkEscapeTracker::default();
         self.properties_mode = PropertiesMode::Menu;
         match self.focus {
             FocusSection::Main => {
                 if let Some(t) = self.selected_task() {
                     self.properties_target = Some(PropertiesTarget::Task(t.id.clone()));
+                    self.properties_anchor = self
+                        .areas
+                        .task_rows
+                        .iter()
+                        .find(|(_, idx)| *idx == self.task_selected)
+                        .map(|(r, _)| (r.x + 2, r.y + 1));
                     self.active_modal = ActiveModal::Properties;
                 }
             }
             FocusSection::Nav => {
                 if let Some(row) = self.all_nav_rows().get(self.nav_selected) {
+                    let anchor = self
+                        .areas
+                        .nav_rows
+                        .iter()
+                        .find(|(_, idx)| *idx == self.nav_selected)
+                        .map(|(r, _)| (r.x + 2, r.y + 1));
                     match &row.kind {
                         NavItemKind::Filter(NavFilter::Project(pid)) => {
                             self.properties_target = Some(PropertiesTarget::Project(pid.clone()));
+                            self.properties_anchor = anchor;
                             self.active_modal = ActiveModal::Properties;
                         }
                         NavItemKind::Filter(NavFilter::Tag(tid)) => {
                             self.properties_target = Some(PropertiesTarget::Tag(tid.clone()));
+                            self.properties_anchor = anchor;
                             self.active_modal = ActiveModal::Properties;
                         }
                         _ => {}
@@ -2157,6 +2364,106 @@ impl App {
             _ => {}
         }
     }
+
+    fn handle_add_entity_key(&mut self, key: KeyEvent) {
+        const PRESET_COLORS: [&str; 6] = [
+            "#89b4fa", "#a6e3a1", "#f9e2af", "#f38ba8", "#cba6f7", "#94e2d5",
+        ];
+        match key.code {
+            KeyCode::Esc => self.active_modal = ActiveModal::None,
+            KeyCode::Tab | KeyCode::Down | KeyCode::Up => {
+                self.add_entity_state.active_field = match self.add_entity_state.active_field {
+                    AddEntityField::Name => AddEntityField::Color,
+                    AddEntityField::Color => AddEntityField::Name,
+                };
+            }
+            KeyCode::Left if self.add_entity_state.active_field == AddEntityField::Color => {
+                let pos = PRESET_COLORS
+                    .iter()
+                    .position(|c| *c == self.add_entity_state.color)
+                    .unwrap_or(0);
+                let next = if pos == 0 {
+                    PRESET_COLORS.len() - 1
+                } else {
+                    pos - 1
+                };
+                self.add_entity_state.color = PRESET_COLORS[next].to_string();
+            }
+            KeyCode::Right if self.add_entity_state.active_field == AddEntityField::Color => {
+                let pos = PRESET_COLORS
+                    .iter()
+                    .position(|c| *c == self.add_entity_state.color)
+                    .unwrap_or(0);
+                let next = (pos + 1) % PRESET_COLORS.len();
+                self.add_entity_state.color = PRESET_COLORS[next].to_string();
+            }
+            KeyCode::Enter => {
+                let title = self.add_entity_state.title.trim().to_string();
+                if title.is_empty() {
+                    return;
+                }
+                let color = self.add_entity_state.color.clone();
+                let kind = self.add_entity_state.kind;
+                self.active_modal = ActiveModal::None;
+                let client = self.client.clone();
+                let tx = self.api_tx.clone();
+                tokio::spawn(async move {
+                    match kind {
+                        AddEntityKind::Project => match client.create_project(&title, &color).await
+                        {
+                            Ok(p) => {
+                                let _ = tx.send(ApiEvent::ProjectCreated(p));
+                            }
+                            Err(e) => {
+                                let _ =
+                                    tx.send(ApiEvent::Error(format!("Create project failed: {e}")));
+                            }
+                        },
+                        AddEntityKind::Tag => match client.create_tag(&title, &color).await {
+                            Ok(t) => {
+                                let _ = tx.send(ApiEvent::TagCreated(t));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(ApiEvent::Error(format!("Create tag failed: {e}")));
+                            }
+                        },
+                    }
+                });
+            }
+            KeyCode::Backspace => match self.add_entity_state.active_field {
+                AddEntityField::Name => {
+                    self.add_entity_state.title.pop();
+                }
+                AddEntityField::Color => {
+                    self.add_entity_state.color.pop();
+                }
+            },
+            KeyCode::Char(c) => match self.add_entity_state.active_field {
+                AddEntityField::Name => self.add_entity_state.title.push(c),
+                AddEntityField::Color => self.add_entity_state.color.push(c),
+            },
+            _ => {}
+        }
+    }
+}
+
+pub fn fuzzy_match(haystack: &str, needle: &str) -> bool {
+    if haystack.contains(needle) {
+        return true;
+    }
+    let mut chars = needle.chars();
+    let Some(mut cur) = chars.next() else {
+        return true;
+    };
+    for h in haystack.chars() {
+        if h == cur {
+            match chars.next() {
+                Some(n) => cur = n,
+                None => return true,
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use crate::app::{
-    ActiveModal, AddTaskField, App, CompletionKind, FocusSection, NavFilter, NavItemKind,
-    PropertiesMode, PropertiesTarget, SettingsField, ThemeEditorState,
+    ActiveModal, AddEntityField, AddEntityKind, AddTaskField, App, CompletionKind, FocusSection,
+    NavFilter, NavItemKind, PropertiesMode, PropertiesTarget, SettingsField, ThemeEditorState,
 };
 use crate::config::KeybindMode;
 use crate::keybinds::all_keybinds;
@@ -121,7 +121,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     render_status_bar(frame, app, status_bar);
 
-    if app.active_modal != ActiveModal::None {
+    if !matches!(app.active_modal, ActiveModal::None | ActiveModal::Theme) {
         dim_background(frame, root);
     }
 
@@ -132,6 +132,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ActiveModal::Settings => render_settings_modal(frame, app, root),
         ActiveModal::AddTask => render_add_task_modal(frame, app, root),
         ActiveModal::Theme => render_theme_modal(frame, app, root),
+        ActiveModal::FullNote => render_full_note_modal(frame, app, root),
+        ActiveModal::AddEntity => render_add_entity_modal(frame, app, root),
     }
 }
 
@@ -147,6 +149,10 @@ fn dim_background(frame: &mut Frame, area: Rect) {
 }
 
 fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(app.config.theme.sidebar_bg_color())),
+        area,
+    );
     let (top_rows, bottom_rows) = app.nav_rows();
     let bottom_h = bottom_rows.len() as u16 + 1;
     let sections = Layout::default()
@@ -280,23 +286,52 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let today_str = Local::now().format("%Y-%m-%d").to_string();
-    let note_height = if app.show_note { 5 } else { 0 };
+    let search_height = if app.search_active || !app.search_query.is_empty() {
+        1
+    } else {
+        0
+    };
+    let note_height = if app.show_note { 6 } else { 0 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(note_height)])
+        .constraints([
+            Constraint::Length(search_height),
+            Constraint::Min(3),
+            Constraint::Length(note_height),
+        ])
         .split(inner);
 
-    let list_area = chunks[0];
-    let note_area = chunks[1];
+    let search_area = chunks[0];
+    let list_area = chunks[1];
+    let note_area = chunks[2];
+
+    if search_height > 0 {
+        let cursor = if app.search_active { "_" } else { "" };
+        let search_line = Line::from(vec![
+            Span::styled(
+                "/ ",
+                Style::default()
+                    .fg(app.config.theme.accent_color())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}{}", app.search_query, cursor),
+                Style::default().fg(app.config.theme.fg_color()),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(search_line), search_area);
+    }
+
     let mut task_rows = Vec::new();
+    let mut row_y = list_area.y;
 
     for (idx, task) in tasks.iter().enumerate() {
-        let y = list_area.y + idx as u16;
-        if y >= list_area.bottom() {
+        if row_y >= list_area.bottom() {
             break;
         }
-        let row_rect = Rect::new(list_area.x, y, list_area.width, 1);
+        let row_rect = Rect::new(list_area.x, row_y, list_area.width, 1);
         task_rows.push((row_rect, idx));
+        row_y += 1;
 
         let is_selected = app.focus == FocusSection::Main && app.task_selected == idx;
         let is_renaming = matches!(
@@ -304,13 +339,23 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
             Some(crate::app::RenameTarget::Task(id)) if id == &task.id
         );
 
+        let subtasks = app.subtasks_for(&task.id);
+        let sub_expanded = app.expanded_subtasks.contains(&task.id);
+        let sub_badge = if subtasks.is_empty() {
+            String::new()
+        } else if sub_expanded {
+            format!(" ▾({})", subtasks.len())
+        } else {
+            format!(" ▸({})", subtasks.len())
+        };
+
         let checkbox = if task.is_done { "\u{f046}" } else { "\u{f096}" };
         let is_tracking = app.current_task_id.as_deref() == Some(task.id.as_str());
         let tracking_prefix = if is_tracking { "\u{f04b} " } else { "" };
         let title_text = if is_renaming {
             format!("{}|", app.rename_buffer)
         } else {
-            format!("{tracking_prefix}{}", task.title)
+            format!("{tracking_prefix}{}{}", task.title, sub_badge)
         };
 
         let mut meta_parts = Vec::new();
@@ -395,6 +440,21 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         frame.render_widget(Paragraph::new(Line::from(spans)), row_rect);
+
+        if sub_expanded {
+            for sub in subtasks {
+                if row_y >= list_area.bottom() {
+                    break;
+                }
+                let sub_rect = Rect::new(list_area.x, row_y, list_area.width, 1);
+                row_y += 1;
+                frame.render_widget(
+                    Paragraph::new(format!("    • {}", sub.title))
+                        .style(Style::default().fg(app.config.theme.muted_color())),
+                    sub_rect,
+                );
+            }
+        }
     }
     app.areas.task_rows = task_rows;
 
@@ -405,11 +465,11 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
             .filter(|n| !n.trim().is_empty())
             .unwrap_or("(No note)");
         let block = Block::default()
-            .title(" Note ")
+            .title(" Note (N: full) ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(app.config.theme.accent_color()));
         frame.render_widget(
-            Paragraph::new(note_text)
+            Paragraph::new(markdown_lines(note_text, &app.config.theme))
                 .block(block)
                 .wrap(Wrap { trim: true }),
             note_area,
@@ -493,7 +553,11 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(app.config.theme.status_bg_color())),
+        area,
+    );
 }
 
 fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
@@ -574,11 +638,11 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(hint_spans("schedule next week", hint, base)),
                 Line::from(hint_spans("unschedule", hint, base)),
                 Line::from(hint_spans("Reschedule", hint, base)),
-                Line::from(hint_spans("move to top", hint, base)),
-                Line::from(hint_spans("move to bottom", hint, base)),
+                Line::from(hint_indices("move to top", hint, &[0, 8], base)),
+                Line::from(hint_indices("move to bottom", hint, &[0, 8], base)),
                 Line::from(hint_spans("add subtask", hint, base)),
                 Line::from(hint_spans("duplicate", hint, base)),
-                Line::from(hint_spans("move to project", hint, base)),
+                Line::from(hint_indices("move to project", hint, &[0, 8], base)),
                 Line::from(""),
                 Line::from(Span::styled(
                     "Type underlined shortcut | Esc or jk to close",
@@ -589,7 +653,18 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let height = (lines.len() as u16) + 4;
-    let popup = centered_rect(42, height, area);
+    let width = 44.min(area.width);
+    let popup = if let Some((ax, ay)) = app.properties_anchor {
+        let x = ax.min(area.right().saturating_sub(width));
+        let y = if ay + height <= area.bottom() {
+            ay
+        } else {
+            area.bottom().saturating_sub(height)
+        };
+        Rect::new(x, y, width, height.min(area.height))
+    } else {
+        centered_rect(width, height, area)
+    };
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -906,7 +981,7 @@ fn render_theme_modal(frame: &mut Frame, app: &App, area: Rect) {
     let Some(ed) = &app.theme_editor else {
         return;
     };
-    let popup = centered_rect(68, 18, area);
+    let popup = centered_rect(68, 20, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -957,6 +1032,159 @@ fn render_theme_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn render_full_note_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(
+        area.width.saturating_sub(8).max(40),
+        area.height.saturating_sub(6).max(12),
+        area,
+    );
+    frame.render_widget(Clear, popup);
+
+    let title = app
+        .selected_task()
+        .map(|t| format!(" Note: {} (Esc / N to close) ", t.title))
+        .unwrap_or_else(|| " Note ".to_string());
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.config.theme.accent_color()))
+        .padding(Padding::uniform(1));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let note_text = app
+        .selected_task()
+        .and_then(|t| t.notes.as_deref())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or("(No note)");
+
+    frame.render_widget(
+        Paragraph::new(markdown_lines(note_text, &app.config.theme)).wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_add_entity_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(54, 11, area);
+    frame.render_widget(Clear, popup);
+
+    let st = &app.add_entity_state;
+    let title = match st.kind {
+        AddEntityKind::Project => " Add Project (a) ",
+        AddEntityKind::Tag => " Add Tag (a) ",
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.config.theme.success_color()))
+        .padding(Padding::uniform(1));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let success = app.config.theme.success_color();
+    let fg = app.config.theme.fg_color();
+    let muted = app.config.theme.muted_color();
+
+    let name_style = if st.active_field == AddEntityField::Name {
+        Style::default().fg(success).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(fg)
+    };
+    let color_style = if st.active_field == AddEntityField::Color {
+        Style::default().fg(success).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(fg)
+    };
+    let swatch = parse_hex_color(&st.color)
+        .map(|c| Span::styled(" ██", Style::default().fg(c)))
+        .unwrap_or_else(|| Span::styled(" ??", Style::default().fg(muted)));
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Name:  ", Style::default().fg(muted)),
+            Span::styled(&st.title, name_style),
+        ]),
+        Line::from(vec![
+            Span::styled("Color: ", Style::default().fg(muted)),
+            Span::styled(&st.color, color_style),
+            swatch,
+            Span::styled("  (Left/Right preset)", Style::default().fg(muted)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Tab: switch | Enter: create | Esc: cancel",
+            Style::default().fg(muted),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn markdown_lines(text: &str, theme: &crate::theme::ThemeConfig) -> Vec<Line<'static>> {
+    let fg = theme.fg_color();
+    let accent = theme.accent_color();
+    let warning = theme.warning_color();
+    let success = theme.success_color();
+
+    text.lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if let Some(h) = trimmed.strip_prefix("# ") {
+                Line::from(Span::styled(
+                    h.to_string(),
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ))
+            } else if let Some(h) = trimmed.strip_prefix("## ") {
+                Line::from(Span::styled(
+                    h.to_string(),
+                    Style::default().fg(warning).add_modifier(Modifier::BOLD),
+                ))
+            } else if let Some(b) = trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("* "))
+            {
+                Line::from(vec![
+                    Span::styled("  • ", Style::default().fg(accent)),
+                    Span::styled(b.to_string(), Style::default().fg(fg)),
+                ])
+            } else {
+                let mut spans = Vec::new();
+                let mut rest = line;
+                while let Some(start) = rest.find('`') {
+                    if start > 0 {
+                        spans.push(Span::styled(
+                            rest[..start].to_string(),
+                            Style::default().fg(fg),
+                        ));
+                    }
+                    let after = &rest[start + 1..];
+                    if let Some(end) = after.find('`') {
+                        spans.push(Span::styled(
+                            after[..end].to_string(),
+                            Style::default().fg(success).add_modifier(Modifier::BOLD),
+                        ));
+                        rest = &after[end + 1..];
+                    } else {
+                        spans.push(Span::styled(
+                            rest[start..].to_string(),
+                            Style::default().fg(fg),
+                        ));
+                        rest = "";
+                        break;
+                    }
+                }
+                if !rest.is_empty() {
+                    spans.push(Span::styled(rest.to_string(), Style::default().fg(fg)));
+                }
+                Line::from(spans)
+            }
+        })
+        .collect()
+}
+
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let w = width.min(area.width);
     let h = height.min(area.height);
@@ -998,6 +1226,8 @@ mod tests {
             ActiveModal::Settings,
             ActiveModal::AddTask,
             ActiveModal::Theme,
+            ActiveModal::FullNote,
+            ActiveModal::AddEntity,
         ] {
             if modal == ActiveModal::Theme {
                 app.theme_editor = Some(ThemeEditorState::new(
