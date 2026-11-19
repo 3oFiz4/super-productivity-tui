@@ -1,6 +1,11 @@
-use crate::app::{ActiveModal, AddTaskField, App, FocusSection, NavItemKind, SettingsField};
+use crate::app::{
+    ActiveModal, AddTaskField, App, CompletionKind, FocusSection, NavFilter, NavItemKind,
+    PropertiesMode, PropertiesTarget, SettingsField, ThemeEditorState,
+};
 use crate::config::KeybindMode;
 use crate::keybinds::all_keybinds;
+use crate::models::parse_hex_color;
+use chrono::Local;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -43,6 +48,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let root = frame.area();
     app.areas.nav_rows.clear();
     app.areas.task_rows.clear();
+
+    let bg = app.config.theme.bg_color();
+    let fg = app.config.theme.fg_color();
+    frame.render_widget(Block::default().style(Style::default().bg(bg).fg(fg)), root);
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -96,6 +105,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ActiveModal::Help => render_help_modal(frame, app, root),
         ActiveModal::Settings => render_settings_modal(frame, app, root),
         ActiveModal::AddTask => render_add_task_modal(frame, app, root),
+        ActiveModal::Theme => render_theme_modal(frame, app, root),
     }
 }
 
@@ -137,7 +147,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         let sep_rect = Rect::new(bottom_area.x, bottom_area.y, bottom_area.width, 1);
         let sep = "─".repeat(bottom_area.width as usize);
         frame.render_widget(
-            Paragraph::new(sep).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(sep).style(Style::default().fg(app.config.theme.border_color())),
             sep_rect,
         );
     }
@@ -159,9 +169,19 @@ fn render_nav_row(frame: &mut Frame, app: &App, row: &crate::app::NavRow, idx: u
     let is_active_filter = matches!(&row.kind, NavItemKind::Filter(f) if *f == app.active_filter);
 
     let fg = match &row.kind {
-        NavItemKind::Filter(crate::app::NavFilter::Project(_)) => Color::Magenta,
-        NavItemKind::Filter(crate::app::NavFilter::Tag(_)) => Color::Green,
-        _ => Color::Gray,
+        NavItemKind::Filter(NavFilter::Project(pid)) => app
+            .projects
+            .iter()
+            .find(|p| &p.id == pid)
+            .map(|p| p.display_color())
+            .unwrap_or(Color::Magenta),
+        NavItemKind::Filter(NavFilter::Tag(tid)) => app
+            .tags
+            .iter()
+            .find(|t| &t.id == tid)
+            .map(|t| t.display_color())
+            .unwrap_or(Color::Green),
+        _ => app.config.theme.fg_color(),
     };
 
     let mut style = Style::default().fg(fg);
@@ -169,7 +189,9 @@ fn render_nav_row(frame: &mut Frame, app: &App, row: &crate::app::NavRow, idx: u
         style = style.add_modifier(Modifier::BOLD);
     }
     if is_selected {
-        style = style.bg(Color::DarkGray).fg(Color::White);
+        style = style
+            .bg(app.config.theme.selection_bg_color())
+            .fg(app.config.theme.fg_color());
     }
 
     let indent_str = " ".repeat(row.indent as usize);
@@ -189,6 +211,8 @@ fn render_divider(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         'h'
     };
+    let accent = app.config.theme.accent_color();
+    let border = app.config.theme.border_color();
 
     for offset in 0..area.height {
         let y = area.y + offset;
@@ -196,25 +220,20 @@ fn render_divider(frame: &mut Frame, app: &App, area: Rect) {
         if offset == mid {
             let style = if app.config.hint_keybind {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(accent)
                     .add_modifier(Modifier::UNDERLINED)
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(accent)
             };
             frame.render_widget(Paragraph::new(hint_char.to_string()).style(style), rect);
         } else {
-            frame.render_widget(
-                Paragraph::new("│").style(Style::default().fg(Color::DarkGray)),
-                rect,
-            );
+            frame.render_widget(Paragraph::new("│").style(Style::default().fg(border)), rect);
         }
     }
 }
 
 fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
-    let padded = Block::default()
-        .padding(Padding::symmetric(4, 2))
-        .style(Style::default());
+    let padded = Block::default().padding(Padding::symmetric(4, 2));
     let inner = padded.inner(area);
     frame.render_widget(padded, area);
 
@@ -227,13 +246,14 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         frame.render_widget(
             Paragraph::new(msg)
-                .style(Style::default().fg(Color::DarkGray))
+                .style(Style::default().fg(app.config.theme.muted_color()))
                 .alignment(Alignment::Center),
             inner,
         );
         return;
     }
 
+    let today_str = Local::now().format("%Y-%m-%d").to_string();
     let note_height = if app.show_note { 5 } else { 0 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -253,7 +273,10 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         task_rows.push((row_rect, idx));
 
         let is_selected = app.focus == FocusSection::Main && app.task_selected == idx;
-        let is_renaming = app.renaming_task_id.as_deref() == Some(task.id.as_str());
+        let is_renaming = matches!(
+            &app.rename_target,
+            Some(crate::app::RenameTarget::Task(id)) if id == &task.id
+        );
 
         let checkbox = if task.is_done { "\u{f046}" } else { "\u{f096}" };
         let title_text = if is_renaming {
@@ -263,10 +286,23 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         };
 
         let mut meta_parts = Vec::new();
+        if let Some(due) = &task.due_day {
+            let due_color = if due.as_str() < today_str.as_str() {
+                app.config.theme.danger_color()
+            } else if due.as_str() == today_str.as_str() {
+                app.config.theme.warning_color()
+            } else {
+                app.config.theme.muted_color()
+            };
+            meta_parts.push(Span::styled(
+                format!(" \u{f073} {due} "),
+                Style::default().fg(due_color),
+            ));
+        }
         if task.repeat_cfg_id.is_some() {
             meta_parts.push(Span::styled(
                 " \u{f01e} Repeat ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.config.theme.muted_color()),
             ));
         }
         if let Some(pid) = &task.project_id
@@ -274,29 +310,31 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         {
             meta_parts.push(Span::styled(
                 format!(" \u{f07b} {} ", proj.title),
-                Style::default().fg(Color::Magenta),
+                Style::default().fg(proj.display_color()),
             ));
         }
         for tid in &task.tag_ids {
             if let Some(tag) = app.tags.iter().find(|t| &t.id == tid) {
                 meta_parts.push(Span::styled(
-                    format!(" \u{f292} #{} ", tag.title),
-                    Style::default().fg(Color::Green),
+                    format!(" \u{f292} {} ", tag.title),
+                    Style::default().fg(tag.display_color()),
                 ));
             }
         }
 
-        let mut row_style = Style::default().fg(Color::White);
+        let mut row_style = Style::default().fg(app.config.theme.fg_color());
         if task.is_done {
             row_style = row_style
-                .fg(Color::DarkGray)
+                .fg(app.config.theme.muted_color())
                 .add_modifier(Modifier::CROSSED_OUT);
         }
         if is_selected {
-            row_style = row_style.bg(Color::DarkGray);
+            row_style = row_style.bg(app.config.theme.selection_bg_color());
         }
         if is_renaming {
-            row_style = Style::default().bg(Color::Blue).fg(Color::White);
+            row_style = Style::default()
+                .fg(app.config.theme.success_color())
+                .add_modifier(Modifier::BOLD);
         }
 
         let left_text = format!(" {checkbox} {title_text}");
@@ -309,7 +347,7 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         ];
         for part in meta_parts {
             let s = if is_selected {
-                part.style.bg(Color::DarkGray)
+                part.style.bg(app.config.theme.selection_bg_color())
             } else {
                 part.style
             };
@@ -329,7 +367,7 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         let block = Block::default()
             .title(" Note ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(Style::default().fg(app.config.theme.accent_color()));
         frame.render_widget(
             Paragraph::new(note_text)
                 .block(block)
@@ -340,7 +378,7 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let mode_label = if app.renaming_task_id.is_some() {
+    let mode_label = if app.rename_target.is_some() {
         "INSERT (jk/Enter to save)"
     } else {
         app.config.keybind_mode.label()
@@ -351,62 +389,144 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         "hn: sidebar"
     };
     let status_color = if app.connected {
-        Color::Green
+        app.config.theme.success_color()
     } else {
-        Color::Red
+        app.config.theme.danger_color()
     };
     let line = Line::from(vec![
         Span::styled(
             format!(" [{mode_label}] "),
-            Style::default().fg(Color::Black).bg(Color::Cyan),
+            Style::default()
+                .fg(Color::Black)
+                .bg(app.config.theme.accent_color()),
         ),
         Span::styled(
             format!(" {} ", app.status_message),
             Style::default().fg(status_color),
         ),
         Span::styled(
-            format!(" | {nav_toggle_hint} | :h help | :s settings "),
-            Style::default().fg(Color::DarkGray),
+            format!(" | {nav_toggle_hint} | :h help | :s settings | :c theme "),
+            Style::default().fg(app.config.theme.muted_color()),
         ),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(36, 7, area);
+    if let PropertiesMode::MoveToProject { selected } = app.properties_mode {
+        let popup = centered_rect(46, (app.projects.len() as u16 + 6).min(18), area);
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(" Move to Project ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.config.theme.warning_color()))
+            .padding(Padding::uniform(1));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+
+        let mut lines = vec![Line::from(Span::styled(
+            "None (Inbox)",
+            if selected == 0 {
+                Style::default()
+                    .fg(app.config.theme.accent_color())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.config.theme.fg_color())
+            },
+        ))];
+        for (i, p) in app.projects.iter().enumerate() {
+            let is_sel = selected == i + 1;
+            let style = if is_sel {
+                Style::default()
+                    .fg(p.display_color())
+                    .bg(app.config.theme.selection_bg_color())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(p.display_color())
+            };
+            lines.push(Line::from(Span::styled(
+                format!("\u{f07b} {}", p.title),
+                style,
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+
+    let hint = app.config.hint_keybind;
+    let base = Style::default().fg(app.config.theme.fg_color());
+
+    let (title, lines) = match &app.properties_target {
+        Some(PropertiesTarget::Project(_)) => (
+            " Project Properties ",
+            vec![
+                Line::from(hint_spans("rename", hint, base)),
+                Line::from(hint_spans("delete", hint, base)),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Esc to close",
+                    Style::default().fg(app.config.theme.muted_color()),
+                )),
+            ],
+        ),
+        Some(PropertiesTarget::Tag(_)) => (
+            " Tag Properties ",
+            vec![
+                Line::from(hint_spans("rename", hint, base)),
+                Line::from(hint_spans("delete", hint, base)),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Esc to close",
+                    Style::default().fg(app.config.theme.muted_color()),
+                )),
+            ],
+        ),
+        _ => (
+            " Task Properties ",
+            vec![
+                Line::from(hint_spans("rename", hint, base)),
+                Line::from(hint_spans("schedule today", hint, base)),
+                Line::from(hint_spans("schedule tomorow", hint, base)),
+                Line::from(hint_spans("schedule next week", hint, base)),
+                Line::from(hint_spans("unschedule", hint, base)),
+                Line::from(hint_spans("Reschedule", hint, base)),
+                Line::from(hint_spans("move to top", hint, base)),
+                Line::from(hint_spans("move to bottom", hint, base)),
+                Line::from(hint_spans("add subtask", hint, base)),
+                Line::from(hint_spans("duplicate", hint, base)),
+                Line::from(hint_spans("move to project", hint, base)),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Type underlined shortcut | Esc to close",
+                    Style::default().fg(app.config.theme.muted_color()),
+                )),
+            ],
+        ),
+    };
+
+    let height = (lines.len() as u16) + 4;
+    let popup = centered_rect(42, height, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .title(" Properties ")
+        .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
+        .border_style(Style::default().fg(app.config.theme.warning_color()))
         .padding(Padding::uniform(1));
 
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-
-    let mut lines = vec![Line::from(hint_spans(
-        "rename",
-        app.config.hint_keybind,
-        Style::default().fg(Color::White),
-    ))];
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Esc to close",
-        Style::default().fg(Color::DarkGray),
-    )));
-
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(72, 20, area);
+    let popup = centered_rect(76, 22, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
         .title(" Help / Keybinds (:h) ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(app.config.theme.accent_color()))
         .padding(Padding::uniform(1));
 
     let inner = block.inner(popup);
@@ -414,14 +534,16 @@ fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     let query = app.help_search.to_lowercase();
     let nvim_active = app.config.keybind_mode.is_nvim_active();
+    let fg = app.config.theme.fg_color();
+    let success = app.config.theme.success_color();
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("Search: ", Style::default().fg(Color::Yellow)),
             Span::styled(
-                format!("{}_", app.help_search),
-                Style::default().fg(Color::White),
+                "Search: ",
+                Style::default().fg(app.config.theme.warning_color()),
             ),
+            Span::styled(format!("{}_", app.help_search), Style::default().fg(fg)),
         ]),
         Line::from(""),
     ];
@@ -434,17 +556,17 @@ fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
         {
             continue;
         }
-        let color = if entry.is_nvim_highlight && nvim_active {
-            Color::Green
+        let key_color = if entry.is_nvim_highlight && nvim_active {
+            success
         } else {
-            Color::White
+            fg
         };
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{key_str:<22}"),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
+                format!("{key_str:<24}"),
+                Style::default().fg(key_color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(entry.description, Style::default().fg(color)),
+            Span::styled(entry.description, Style::default().fg(fg)),
         ]));
     }
 
@@ -458,18 +580,20 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(" Settings (:s) ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(app.config.theme.accent_color()))
         .padding(Padding::uniform(1));
 
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
     let st = &app.settings_state;
+    let accent = app.config.theme.accent_color();
+    let fg = app.config.theme.fg_color();
     let field_style = |f: SettingsField| {
         if st.active_field == f {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+            Style::default().fg(accent).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(fg)
         }
     };
 
@@ -485,7 +609,7 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled(
             "CLI Settings",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(app.config.theme.warning_color())
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -514,7 +638,7 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "Tab/Up/Down: move | Space: toggle | Enter: save & connect | Esc: cancel",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.config.theme.muted_color()),
         )),
     ];
 
@@ -522,87 +646,230 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_add_task_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(64, 15, area);
+    let popup = centered_rect(72, 22, area);
     frame.render_widget(Clear, popup);
 
+    let title_label = if app.add_task_state.parent_id.is_some() {
+        " Add Subtask "
+    } else {
+        " Add Task (a) "
+    };
+
     let block = Block::default()
-        .title(" Add Task (a) ")
+        .title(title_label)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
+        .border_style(Style::default().fg(app.config.theme.success_color()))
         .padding(Padding::uniform(1));
 
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
     let st = &app.add_task_state;
+    let success = app.config.theme.success_color();
+    let fg = app.config.theme.fg_color();
+    let muted = app.config.theme.muted_color();
+
     let field_style = |f: AddTaskField| {
         if st.active_field == f {
-            Style::default().fg(Color::Black).bg(Color::Green)
+            Style::default().fg(success).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(fg)
         }
     };
 
-    let proj_name = if st.project_idx == 0 {
-        "None (Inbox)".to_string()
-    } else {
-        app.projects
-            .get(st.project_idx - 1)
-            .map(|p| p.title.clone())
-            .unwrap_or_else(|| "None".to_string())
-    };
-
-    let tags_display = if app.tags.is_empty() {
-        "No tags available".to_string()
-    } else {
-        app.tags
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let checked = st.selected_tag_ids.contains(&t.id);
-                let mark = if checked { "[x]" } else { "[ ]" };
-                if st.active_field == AddTaskField::Tags && i == st.tag_cursor {
-                    format!(">{mark}#{}<", t.title)
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Title:    ", Style::default().fg(muted)),
+            Span::styled(
+                if st.title.is_empty() && st.active_field != AddTaskField::Title {
+                    "<type title, #tag, @time>"
                 } else {
-                    format!("{mark}#{}", t.title)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-
-    let lines = vec![
-        Line::from(vec![
-            Span::raw("Title:    "),
-            Span::styled(&st.title, field_style(AddTaskField::Title)),
+                    &st.title
+                },
+                field_style(AddTaskField::Title),
+            ),
+            if st.active_field == AddTaskField::Title {
+                Span::styled("_", Style::default().fg(success))
+            } else {
+                Span::raw("")
+            },
         ]),
         Line::from(vec![
-            Span::raw("Note:     "),
+            Span::styled("Note:     ", Style::default().fg(muted)),
             Span::styled(&st.note, field_style(AddTaskField::Note)),
+            if st.active_field == AddTaskField::Note {
+                Span::styled("_", Style::default().fg(success))
+            } else {
+                Span::raw("")
+            },
         ]),
         Line::from(vec![
-            Span::raw("Position: "),
+            Span::styled("Position: ", Style::default().fg(muted)),
             Span::styled(
                 if st.add_to_top { "Top" } else { "Bottom" },
                 field_style(AddTaskField::Position),
             ),
-        ]),
-        Line::from(vec![
-            Span::raw("Project:  "),
-            Span::styled(proj_name, field_style(AddTaskField::Project)),
-        ]),
-        Line::from(vec![
-            Span::raw("Tags:     "),
-            Span::styled(tags_display, field_style(AddTaskField::Tags)),
+            Span::styled("   Repeat: ", Style::default().fg(muted)),
+            Span::styled(st.repeat.label(), field_style(AddTaskField::Repeat)),
         ]),
         Line::from(""),
-        Line::from(Span::styled(
-            "Tab: next | Left/Right/Space: select | Enter: create | Esc: cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
+        Line::from(Span::styled("Project:", field_style(AddTaskField::Project))),
     ];
 
+    let mut proj_spans = vec![Span::raw("  ")];
+    let inbox_sel = st.project_idx == 0;
+    proj_spans.push(Span::styled(
+        if inbox_sel { "[Inbox] " } else { " Inbox  " },
+        if inbox_sel {
+            Style::default().fg(success).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(muted)
+        },
+    ));
+    for (i, p) in app.projects.iter().enumerate() {
+        let sel = st.project_idx == i + 1;
+        let label = if sel {
+            format!("[\u{f07b} {}] ", p.title)
+        } else {
+            format!(" \u{f07b} {}  ", p.title)
+        };
+        proj_spans.push(Span::styled(
+            label,
+            Style::default().fg(p.display_color()).add_modifier(if sel {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+        ));
+    }
+    lines.push(Line::from(proj_spans));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Tags:",
+        field_style(AddTaskField::Tags),
+    )));
+    if app.tags.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (No tags available)",
+            Style::default().fg(muted),
+        )));
+    } else {
+        for (i, t) in app.tags.iter().enumerate().take(4) {
+            let checked = st.selected_tag_ids.contains(&t.id);
+            let cursor = st.active_field == AddTaskField::Tags && i == st.tag_cursor;
+            let mark = if checked { "\u{f046}" } else { "\u{f096}" };
+            let prefix = if cursor { "  > " } else { "    " };
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{mark} \u{f292} {}", t.title),
+                Style::default()
+                    .fg(t.display_color())
+                    .add_modifier(if cursor {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Tab: field | Left/Right/Space: select | Enter: create | Esc: cancel",
+        Style::default().fg(muted),
+    )));
+
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+
+    if let Some(comp) = &st.completion {
+        let comp_h = (comp.items.len() as u16 + 2).min(8);
+        let comp_w = 28.min(inner.width);
+        let comp_rect = Rect::new(inner.x + 10, inner.y + 1, comp_w, comp_h);
+        frame.render_widget(Clear, comp_rect);
+        let comp_title = match comp.kind {
+            CompletionKind::Tag => " Tags (#) ",
+            CompletionKind::Time => " Time (@) ",
+        };
+        let comp_block = Block::default()
+            .title(comp_title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.config.theme.accent_color()));
+        let comp_inner = comp_block.inner(comp_rect);
+        frame.render_widget(comp_block, comp_rect);
+
+        let comp_lines: Vec<Line> = comp
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let s = if i == comp.selected {
+                    Style::default()
+                        .fg(success)
+                        .bg(app.config.theme.selection_bg_color())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(fg)
+                };
+                Line::from(Span::styled(item.clone(), s))
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(comp_lines), comp_inner);
+    }
+}
+
+fn render_theme_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(ed) = &app.theme_editor else {
+        return;
+    };
+    let popup = centered_rect(68, 18, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Colorscheme / Theme (:c) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.config.theme.accent_color()))
+        .padding(Padding::uniform(1));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let accent = app.config.theme.accent_color();
+    let fg = app.config.theme.fg_color();
+    let muted = app.config.theme.muted_color();
+
+    let mut lines = Vec::new();
+    for (i, label) in ThemeEditorState::FIELD_LABELS.iter().enumerate() {
+        let val = ed.field_value(i);
+        let is_sel = ed.field_idx == i;
+        let val_style = if is_sel {
+            Style::default().fg(accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(fg)
+        };
+        let swatch = if i > 0 {
+            if let Some(c) = parse_hex_color(val) {
+                Span::styled(" ██", Style::default().fg(c))
+            } else {
+                Span::styled(" ??", Style::default().fg(muted))
+            }
+        } else {
+            Span::raw("  (Left/Right preset)")
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("{label:<18}: "), Style::default().fg(muted)),
+            Span::styled(val, val_style),
+            swatch,
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Ctrl+S: save template | Enter: apply | Esc: revert",
+        Style::default().fg(muted),
+    )));
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -645,7 +912,14 @@ mod tests {
             ActiveModal::Help,
             ActiveModal::Settings,
             ActiveModal::AddTask,
+            ActiveModal::Theme,
         ] {
+            if modal == ActiveModal::Theme {
+                app.theme_editor = Some(ThemeEditorState::new(
+                    &app.config.theme,
+                    &app.config.saved_themes,
+                ));
+            }
             app.active_modal = modal;
             terminal.draw(|f| render(f, &mut app)).unwrap();
         }

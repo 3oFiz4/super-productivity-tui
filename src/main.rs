@@ -3,6 +3,7 @@ mod app;
 mod config;
 mod keybinds;
 mod models;
+mod theme;
 mod ui;
 
 use anyhow::Result;

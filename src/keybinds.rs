@@ -88,6 +88,18 @@ pub fn all_keybinds() -> Vec<KeybindEntry> {
             is_nvim_highlight: true,
         },
         KeybindEntry {
+            normal: "u",
+            nvim: "u",
+            description: "Undo last task change",
+            is_nvim_highlight: false,
+        },
+        KeybindEntry {
+            normal: "U",
+            nvim: "Ctrl+r",
+            description: "Redo last undone change",
+            is_nvim_highlight: true,
+        },
+        KeybindEntry {
             normal: ":h",
             nvim: ":h",
             description: "Open searchable Help / Keybinds",
@@ -97,6 +109,12 @@ pub fn all_keybinds() -> Vec<KeybindEntry> {
             normal: ":s",
             nvim: ":s",
             description: "Open Settings (CLI configuration)",
+            is_nvim_highlight: false,
+        },
+        KeybindEntry {
+            normal: ":c",
+            nvim: ":c",
+            description: "Open Colorscheme / Theme editor",
             is_nvim_highlight: false,
         },
         KeybindEntry {

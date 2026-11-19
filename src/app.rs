@@ -2,10 +2,13 @@ use crate::api::SuperProductivityClient;
 use crate::config::{AppConfig, KeybindMode};
 use crate::keybinds::{JkEscapeTracker, JkResult, SequenceState};
 use crate::models::{CreateTaskPayload, Project, Tag, Task};
+use crate::theme::ThemeConfig;
+use chrono::{Duration as ChronoDuration, Local};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
+use serde_json::json;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +52,71 @@ pub enum ActiveModal {
     Help,
     Settings,
     AddTask,
+    Theme,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropertiesTarget {
+    Task(String),
+    Project(String),
+    Tag(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropertiesMode {
+    Menu,
+    MoveToProject { selected: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatOption {
+    None,
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl RepeatOption {
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::Daily,
+            Self::Daily => Self::Weekly,
+            Self::Weekly => Self::Monthly,
+            Self::Monthly => Self::None,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::None => Self::Monthly,
+            Self::Daily => Self::None,
+            Self::Weekly => Self::Daily,
+            Self::Monthly => Self::Weekly,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Daily => "Daily",
+            Self::Weekly => "Weekly",
+            Self::Monthly => "Monthly",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletionKind {
+    Tag,
+    Time,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletionPopup {
+    pub kind: CompletionKind,
+    pub items: Vec<String>,
+    pub selected: usize,
+    pub trigger_start: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +124,7 @@ pub enum AddTaskField {
     Title,
     Note,
     Position,
+    Repeat,
     Project,
     Tags,
 }
@@ -65,7 +134,8 @@ impl AddTaskField {
         match self {
             Self::Title => Self::Note,
             Self::Note => Self::Position,
-            Self::Position => Self::Project,
+            Self::Position => Self::Repeat,
+            Self::Repeat => Self::Project,
             Self::Project => Self::Tags,
             Self::Tags => Self::Title,
         }
@@ -76,7 +146,8 @@ impl AddTaskField {
             Self::Title => Self::Tags,
             Self::Note => Self::Title,
             Self::Position => Self::Note,
-            Self::Project => Self::Position,
+            Self::Repeat => Self::Position,
+            Self::Project => Self::Repeat,
             Self::Tags => Self::Project,
         }
     }
@@ -87,10 +158,13 @@ pub struct AddTaskState {
     pub title: String,
     pub note: String,
     pub add_to_top: bool,
+    pub repeat: RepeatOption,
     pub project_idx: usize,
     pub selected_tag_ids: Vec<String>,
     pub tag_cursor: usize,
+    pub parent_id: Option<String>,
     pub active_field: AddTaskField,
+    pub completion: Option<CompletionPopup>,
 }
 
 impl Default for AddTaskState {
@@ -99,10 +173,13 @@ impl Default for AddTaskState {
             title: String::new(),
             note: String::new(),
             add_to_top: false,
+            repeat: RepeatOption::None,
             project_idx: 0,
             selected_tag_ids: Vec::new(),
             tag_cursor: 0,
+            parent_id: None,
             active_field: AddTaskField::Title,
+            completion: None,
         }
     }
 }
@@ -156,6 +233,114 @@ impl From<&AppConfig> for SettingsState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ThemeEditorState {
+    pub original: ThemeConfig,
+    pub editing: ThemeConfig,
+    pub preset_idx: usize,
+    pub field_idx: usize,
+}
+
+impl ThemeEditorState {
+    pub const FIELD_LABELS: [&'static str; 10] = [
+        "Preset / Name",
+        "Background (bg)",
+        "Foreground (fg)",
+        "Accent",
+        "Muted",
+        "Border",
+        "Success",
+        "Warning",
+        "Danger",
+        "Selection Bg",
+    ];
+
+    pub fn new(current: &ThemeConfig, saved: &[ThemeConfig]) -> Self {
+        let mut all = ThemeConfig::builtin_themes();
+        all.extend(saved.iter().cloned());
+        let preset_idx = all.iter().position(|t| t.name == current.name).unwrap_or(0);
+        Self {
+            original: current.clone(),
+            editing: current.clone(),
+            preset_idx,
+            field_idx: 0,
+        }
+    }
+
+    pub fn field_value_mut(&mut self) -> &mut String {
+        match self.field_idx {
+            0 => &mut self.editing.name,
+            1 => &mut self.editing.bg,
+            2 => &mut self.editing.fg,
+            3 => &mut self.editing.accent,
+            4 => &mut self.editing.muted,
+            5 => &mut self.editing.border,
+            6 => &mut self.editing.success,
+            7 => &mut self.editing.warning,
+            8 => &mut self.editing.danger,
+            _ => &mut self.editing.selection_bg,
+        }
+    }
+
+    pub fn field_value(&self, idx: usize) -> &str {
+        match idx {
+            0 => &self.editing.name,
+            1 => &self.editing.bg,
+            2 => &self.editing.fg,
+            3 => &self.editing.accent,
+            4 => &self.editing.muted,
+            5 => &self.editing.border,
+            6 => &self.editing.success,
+            7 => &self.editing.warning,
+            8 => &self.editing.danger,
+            _ => &self.editing.selection_bg,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum UndoOp {
+    ToggleDone {
+        id: String,
+        prev_done: bool,
+    },
+    RenameTask {
+        id: String,
+        prev_title: String,
+        new_title: String,
+    },
+    ScheduleTask {
+        id: String,
+        prev_due: Option<String>,
+        new_due: Option<String>,
+    },
+    MoveIndex {
+        id: String,
+        prev_idx: usize,
+        new_idx: usize,
+    },
+    MoveProject {
+        id: String,
+        prev_project: Option<String>,
+        new_project: Option<String>,
+    },
+    DeleteTask {
+        task: Task,
+        index: usize,
+    },
+    CreateTask {
+        task: Task,
+        to_top: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum RenameTarget {
+    Task(String),
+    Project(String),
+    Tag(String),
+}
+
 #[derive(Debug)]
 pub enum ApiEvent {
     Loaded {
@@ -168,6 +353,10 @@ pub enum ApiEvent {
     TaskUpdated(Task),
     TaskCreated(Task, bool),
     TaskDeleted(String),
+    ProjectUpdated(Project),
+    ProjectDeleted(String),
+    TagUpdated(Tag),
+    TagDeleted(String),
     Error(String),
 }
 
@@ -199,15 +388,22 @@ pub struct App {
     pub status_message: String,
 
     pub show_note: bool,
-    pub renaming_task_id: Option<String>,
+    pub rename_target: Option<RenameTarget>,
     pub rename_buffer: String,
     pub jk_tracker: JkEscapeTracker,
     pub sequence: SequenceState,
+    pub prop_sequence: SequenceState,
 
     pub active_modal: ActiveModal,
+    pub properties_target: Option<PropertiesTarget>,
+    pub properties_mode: PropertiesMode,
     pub help_search: String,
     pub settings_state: SettingsState,
     pub add_task_state: AddTaskState,
+    pub theme_editor: Option<ThemeEditorState>,
+
+    pub undo_stack: Vec<UndoOp>,
+    pub redo_stack: Vec<UndoOp>,
 
     pub areas: UiAreas,
     pub api_tx: mpsc::UnboundedSender<ApiEvent>,
@@ -234,14 +430,20 @@ impl App {
             connected: false,
             status_message: "Connecting...".to_string(),
             show_note: false,
-            renaming_task_id: None,
+            rename_target: None,
             rename_buffer: String::new(),
             jk_tracker: JkEscapeTracker::default(),
             sequence: SequenceState::default(),
+            prop_sequence: SequenceState::default(),
             active_modal: ActiveModal::None,
+            properties_target: None,
+            properties_mode: PropertiesMode::Menu,
             help_search: String::new(),
             settings_state,
             add_task_state: AddTaskState::default(),
+            theme_editor: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             areas: UiAreas::default(),
             api_tx,
         }
@@ -322,6 +524,10 @@ impl App {
                 self.status_message = "Task updated".to_string();
             }
             ApiEvent::TaskCreated(created, to_top) => {
+                self.push_undo(UndoOp::CreateTask {
+                    task: created.clone(),
+                    to_top,
+                });
                 if to_top {
                     self.tasks.insert(0, created);
                     self.task_selected = 0;
@@ -334,6 +540,28 @@ impl App {
             ApiEvent::TaskDeleted(id) => {
                 self.tasks.retain(|t| t.id != id);
                 self.status_message = "Task deleted".to_string();
+                self.clamp_selections();
+            }
+            ApiEvent::ProjectUpdated(updated) => {
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == updated.id) {
+                    *p = updated;
+                }
+                self.status_message = "Project updated".to_string();
+            }
+            ApiEvent::ProjectDeleted(id) => {
+                self.projects.retain(|p| p.id != id);
+                self.status_message = "Project deleted".to_string();
+                self.clamp_selections();
+            }
+            ApiEvent::TagUpdated(updated) => {
+                if let Some(t) = self.tags.iter_mut().find(|t| t.id == updated.id) {
+                    *t = updated;
+                }
+                self.status_message = "Tag updated".to_string();
+            }
+            ApiEvent::TagDeleted(id) => {
+                self.tags.retain(|t| t.id != id);
+                self.status_message = "Tag deleted".to_string();
                 self.clamp_selections();
             }
             ApiEvent::Error(msg) => {
@@ -494,7 +722,7 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        if self.renaming_task_id.is_some() && self.jk_tracker.poll_expired() {
+        if self.rename_target.is_some() && self.jk_tracker.poll_expired() {
             self.rename_buffer.push('j');
         }
     }
@@ -503,7 +731,7 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        if self.renaming_task_id.is_some() {
+        if self.rename_target.is_some() {
             self.handle_rename_key(key);
             return;
         }
@@ -525,10 +753,22 @@ impl App {
                 self.handle_add_task_key(key);
                 return;
             }
+            ActiveModal::Theme => {
+                self.handle_theme_key(key);
+                return;
+            }
             ActiveModal::None => {}
         }
 
         let mode = self.config.keybind_mode;
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+            if mode.is_nvim_active() {
+                self.sequence.clear();
+                self.redo();
+            }
+            return;
+        }
 
         if key.code == KeyCode::Tab && mode.is_normal_active() {
             self.sequence.clear();
@@ -585,6 +825,15 @@ impl App {
                         self.active_modal = ActiveModal::Settings;
                         return;
                     }
+                    (':', 'c') => {
+                        self.sequence.clear();
+                        self.theme_editor = Some(ThemeEditorState::new(
+                            &self.config.theme,
+                            &self.config.saved_themes,
+                        ));
+                        self.active_modal = ActiveModal::Theme;
+                        return;
+                    }
                     ('g', 'a') => {
                         self.sequence.clear();
                         self.focus = FocusSection::Main;
@@ -627,7 +876,7 @@ impl App {
                 'o' if mode.is_nvim_active() => self.activate_selected(),
                 'p' if mode.is_normal_active() => self.open_properties(),
                 'O' if mode.is_nvim_active() => self.open_properties(),
-                'i' if mode.is_nvim_active() => self.start_rename(),
+                'i' if mode.is_nvim_active() => self.start_rename_selected_task(),
                 'a' => {
                     self.add_task_state = AddTaskState::default();
                     self.active_modal = ActiveModal::AddTask;
@@ -635,13 +884,15 @@ impl App {
                 'd' => self.delete_selected_task(),
                 'n' if mode.is_normal_active() => self.show_note = !self.show_note,
                 'K' if mode.is_nvim_active() => self.show_note = !self.show_note,
+                'u' => self.undo(),
+                'U' if mode == KeybindMode::Normal => self.redo(),
                 _ => {}
             }
         }
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.active_modal != ActiveModal::None || self.renaming_task_id.is_some() {
+        if self.active_modal != ActiveModal::None || self.rename_target.is_some() {
             return;
         }
         let col = mouse.column;
@@ -670,6 +921,14 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Right) => {
+                for (rect, idx) in &self.areas.nav_rows {
+                    if rect.contains((col, row).into()) {
+                        self.focus = FocusSection::Nav;
+                        self.nav_selected = *idx;
+                        self.open_properties();
+                        return;
+                    }
+                }
                 for (rect, idx) in &self.areas.task_rows {
                     if rect.contains((col, row).into()) {
                         self.focus = FocusSection::Main;
@@ -757,6 +1016,13 @@ impl App {
             FocusSection::Main => {
                 if let Some(task) = self.selected_task().cloned() {
                     let next_done = !task.is_done;
+                    self.push_undo(UndoOp::ToggleDone {
+                        id: task.id.clone(),
+                        prev_done: task.is_done,
+                    });
+                    if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task.id) {
+                        t.is_done = next_done;
+                    }
                     let client = self.client.clone();
                     let tx = self.api_tx.clone();
                     tokio::spawn(async move {
@@ -775,15 +1041,37 @@ impl App {
     }
 
     fn open_properties(&mut self) {
-        if self.focus == FocusSection::Main && self.selected_task().is_some() {
-            self.active_modal = ActiveModal::Properties;
+        self.prop_sequence.clear();
+        self.properties_mode = PropertiesMode::Menu;
+        match self.focus {
+            FocusSection::Main => {
+                if let Some(t) = self.selected_task() {
+                    self.properties_target = Some(PropertiesTarget::Task(t.id.clone()));
+                    self.active_modal = ActiveModal::Properties;
+                }
+            }
+            FocusSection::Nav => {
+                if let Some(row) = self.all_nav_rows().get(self.nav_selected) {
+                    match &row.kind {
+                        NavItemKind::Filter(NavFilter::Project(pid)) => {
+                            self.properties_target = Some(PropertiesTarget::Project(pid.clone()));
+                            self.active_modal = ActiveModal::Properties;
+                        }
+                        NavItemKind::Filter(NavFilter::Tag(tid)) => {
+                            self.properties_target = Some(PropertiesTarget::Tag(tid.clone()));
+                            self.active_modal = ActiveModal::Properties;
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
-    fn start_rename(&mut self) {
+    fn start_rename_selected_task(&mut self) {
         if let Some(task) = self.selected_task().cloned() {
             self.active_modal = ActiveModal::None;
-            self.renaming_task_id = Some(task.id);
+            self.rename_target = Some(RenameTarget::Task(task.id));
             self.rename_buffer = task.title;
             self.jk_tracker = JkEscapeTracker::default();
         }
@@ -791,6 +1079,13 @@ impl App {
 
     fn delete_selected_task(&mut self) {
         if let Some(task) = self.selected_task().cloned() {
+            let idx = self.tasks.iter().position(|t| t.id == task.id).unwrap_or(0);
+            self.push_undo(UndoOp::DeleteTask {
+                task: task.clone(),
+                index: idx,
+            });
+            self.tasks.retain(|t| t.id != task.id);
+            self.clamp_selections();
             let client = self.client.clone();
             let tx = self.api_tx.clone();
             tokio::spawn(async move {
@@ -806,11 +1101,430 @@ impl App {
         }
     }
 
+    fn push_undo(&mut self, op: UndoOp) {
+        self.undo_stack.push(op);
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(&mut self) {
+        let Some(op) = self.undo_stack.pop() else {
+            self.status_message = "Nothing to undo".to_string();
+            return;
+        };
+        match &op {
+            UndoOp::ToggleDone { id, prev_done } => {
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == *id) {
+                    t.is_done = *prev_done;
+                }
+                self.spawn_patch(id.clone(), json!({ "isDone": prev_done }));
+            }
+            UndoOp::RenameTask { id, prev_title, .. } => {
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == *id) {
+                    t.title = prev_title.clone();
+                }
+                self.spawn_patch(id.clone(), json!({ "title": prev_title }));
+            }
+            UndoOp::ScheduleTask { id, prev_due, .. } => {
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == *id) {
+                    t.due_day = prev_due.clone();
+                }
+                self.spawn_patch(id.clone(), json!({ "dueDay": prev_due }));
+            }
+            UndoOp::MoveIndex {
+                id,
+                prev_idx,
+                new_idx: _,
+            } => {
+                if let Some(cur) = self.tasks.iter().position(|t| t.id == *id) {
+                    let item = self.tasks.remove(cur);
+                    let target = (*prev_idx).min(self.tasks.len());
+                    self.tasks.insert(target, item);
+                }
+            }
+            UndoOp::MoveProject {
+                id, prev_project, ..
+            } => {
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == *id) {
+                    t.project_id = prev_project.clone();
+                }
+                self.spawn_patch(id.clone(), json!({ "projectId": prev_project }));
+            }
+            UndoOp::DeleteTask { task, index } => {
+                let target = (*index).min(self.tasks.len());
+                self.tasks.insert(target, task.clone());
+                let payload = CreateTaskPayload {
+                    title: task.title.clone(),
+                    notes: task.notes.clone(),
+                    project_id: task.project_id.clone(),
+                    parent_id: task.parent_id.clone(),
+                    tag_ids: task.tag_ids.clone(),
+                    due_day: task.due_day.clone(),
+                    time_estimate: task.time_estimate,
+                    is_add_to_top: Some(target == 0),
+                };
+                self.spawn_create(payload, target == 0);
+            }
+            UndoOp::CreateTask { task, .. } => {
+                let id = task.id.clone();
+                self.tasks.retain(|t| t.id != id);
+                self.spawn_delete(id);
+            }
+        }
+        self.redo_stack.push(op);
+        self.status_message = "Undone".to_string();
+        self.clamp_selections();
+    }
+
+    pub fn redo(&mut self) {
+        let Some(op) = self.redo_stack.pop() else {
+            self.status_message = "Nothing to redo".to_string();
+            return;
+        };
+        match &op {
+            UndoOp::ToggleDone { id, prev_done } => {
+                let next_done = !prev_done;
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == *id) {
+                    t.is_done = next_done;
+                }
+                self.spawn_patch(id.clone(), json!({ "isDone": next_done }));
+            }
+            UndoOp::RenameTask { id, new_title, .. } => {
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == *id) {
+                    t.title = new_title.clone();
+                }
+                self.spawn_patch(id.clone(), json!({ "title": new_title }));
+            }
+            UndoOp::ScheduleTask { id, new_due, .. } => {
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == *id) {
+                    t.due_day = new_due.clone();
+                }
+                self.spawn_patch(id.clone(), json!({ "dueDay": new_due }));
+            }
+            UndoOp::MoveIndex { id, new_idx, .. } => {
+                if let Some(cur) = self.tasks.iter().position(|t| t.id == *id) {
+                    let item = self.tasks.remove(cur);
+                    let target = (*new_idx).min(self.tasks.len());
+                    self.tasks.insert(target, item);
+                }
+            }
+            UndoOp::MoveProject {
+                id, new_project, ..
+            } => {
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == *id) {
+                    t.project_id = new_project.clone();
+                }
+                self.spawn_patch(id.clone(), json!({ "projectId": new_project }));
+            }
+            UndoOp::DeleteTask { task, .. } => {
+                let id = task.id.clone();
+                self.tasks.retain(|t| t.id != id);
+                self.spawn_delete(id);
+            }
+            UndoOp::CreateTask { task, to_top } => {
+                if *to_top {
+                    self.tasks.insert(0, task.clone());
+                } else {
+                    self.tasks.push(task.clone());
+                }
+                let payload = CreateTaskPayload {
+                    title: task.title.clone(),
+                    notes: task.notes.clone(),
+                    project_id: task.project_id.clone(),
+                    parent_id: task.parent_id.clone(),
+                    tag_ids: task.tag_ids.clone(),
+                    due_day: task.due_day.clone(),
+                    time_estimate: task.time_estimate,
+                    is_add_to_top: Some(*to_top),
+                };
+                self.spawn_create(payload, *to_top);
+            }
+        }
+        self.undo_stack.push(op);
+        self.status_message = "Redone".to_string();
+        self.clamp_selections();
+    }
+
+    fn spawn_patch(&self, id: String, patch: serde_json::Value) {
+        let client = self.client.clone();
+        let tx = self.api_tx.clone();
+        tokio::spawn(async move {
+            match client.update_task(&id, patch).await {
+                Ok(t) => {
+                    let _ = tx.send(ApiEvent::TaskUpdated(t));
+                }
+                Err(e) => {
+                    let _ = tx.send(ApiEvent::Error(format!("Update failed: {e}")));
+                }
+            }
+        });
+    }
+
+    fn spawn_create(&self, payload: CreateTaskPayload, to_top: bool) {
+        let client = self.client.clone();
+        let tx = self.api_tx.clone();
+        tokio::spawn(async move {
+            match client.create_task(payload).await {
+                Ok(t) => {
+                    let _ = tx.send(ApiEvent::TaskCreated(t, to_top));
+                }
+                Err(e) => {
+                    let _ = tx.send(ApiEvent::Error(format!("Create failed: {e}")));
+                }
+            }
+        });
+    }
+
+    fn spawn_delete(&self, id: String) {
+        let client = self.client.clone();
+        let tx = self.api_tx.clone();
+        tokio::spawn(async move {
+            match client.delete_task(&id).await {
+                Ok(()) => {
+                    let _ = tx.send(ApiEvent::TaskDeleted(id));
+                }
+                Err(e) => {
+                    let _ = tx.send(ApiEvent::Error(format!("Delete failed: {e}")));
+                }
+            }
+        });
+    }
+
     fn handle_properties_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.active_modal = ActiveModal::None,
-            KeyCode::Char('r') => self.start_rename(),
-            _ => {}
+        if let PropertiesMode::MoveToProject { ref mut selected } = self.properties_mode {
+            let max_idx = self.projects.len();
+            match key.code {
+                KeyCode::Esc => {
+                    self.properties_mode = PropertiesMode::Menu;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if *selected < max_idx {
+                        *selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let sel = *selected;
+                    let target_pid = if sel == 0 {
+                        None
+                    } else {
+                        self.projects.get(sel - 1).map(|p| p.id.clone())
+                    };
+                    if let Some(PropertiesTarget::Task(tid)) = self.properties_target.clone()
+                        && let Some(t) = self.tasks.iter_mut().find(|t| t.id == tid)
+                    {
+                        let prev = t.project_id.clone();
+                        t.project_id = target_pid.clone();
+                        self.push_undo(UndoOp::MoveProject {
+                            id: tid.clone(),
+                            prev_project: prev,
+                            new_project: target_pid.clone(),
+                        });
+                        self.spawn_patch(tid, json!({ "projectId": target_pid }));
+                    }
+                    self.active_modal = ActiveModal::None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if key.code == KeyCode::Esc {
+            self.prop_sequence.clear();
+            self.active_modal = ActiveModal::None;
+            return;
+        }
+
+        let Some(target) = self.properties_target.clone() else {
+            return;
+        };
+
+        let KeyCode::Char(ch) = key.code else {
+            return;
+        };
+
+        match target {
+            PropertiesTarget::Project(pid) => match ch {
+                'r' => {
+                    if let Some(p) = self.projects.iter().find(|p| p.id == pid) {
+                        self.active_modal = ActiveModal::None;
+                        self.rename_target = Some(RenameTarget::Project(pid));
+                        self.rename_buffer = p.title.clone();
+                        self.jk_tracker = JkEscapeTracker::default();
+                    }
+                }
+                'd' => {
+                    self.active_modal = ActiveModal::None;
+                    self.projects.retain(|p| p.id != pid);
+                    let client = self.client.clone();
+                    let tx = self.api_tx.clone();
+                    tokio::spawn(async move {
+                        match client.delete_project(&pid).await {
+                            Ok(()) => {
+                                let _ = tx.send(ApiEvent::ProjectDeleted(pid));
+                            }
+                            Err(e) => {
+                                let _ =
+                                    tx.send(ApiEvent::Error(format!("Delete project failed: {e}")));
+                            }
+                        }
+                    });
+                }
+                _ => {}
+            },
+            PropertiesTarget::Tag(tid) => match ch {
+                'r' => {
+                    if let Some(t) = self.tags.iter().find(|t| t.id == tid) {
+                        self.active_modal = ActiveModal::None;
+                        self.rename_target = Some(RenameTarget::Tag(tid));
+                        self.rename_buffer = t.title.clone();
+                        self.jk_tracker = JkEscapeTracker::default();
+                    }
+                }
+                'd' => {
+                    self.active_modal = ActiveModal::None;
+                    self.tags.retain(|t| t.id != tid);
+                    let client = self.client.clone();
+                    let tx = self.api_tx.clone();
+                    tokio::spawn(async move {
+                        match client.delete_tag(&tid).await {
+                            Ok(()) => {
+                                let _ = tx.send(ApiEvent::TagDeleted(tid));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(ApiEvent::Error(format!("Delete tag failed: {e}")));
+                            }
+                        }
+                    });
+                }
+                _ => {}
+            },
+            PropertiesTarget::Task(tid) => {
+                if let Some((first, second)) = self.prop_sequence.push(ch) {
+                    match (first, second) {
+                        ('s', 'd') => {
+                            self.prop_sequence.clear();
+                            let today = Local::now().format("%Y-%m-%d").to_string();
+                            self.schedule_task(&tid, Some(today));
+                            self.active_modal = ActiveModal::None;
+                            return;
+                        }
+                        ('s', 'm') => {
+                            self.prop_sequence.clear();
+                            let tomorrow = (Local::now() + ChronoDuration::days(1))
+                                .format("%Y-%m-%d")
+                                .to_string();
+                            self.schedule_task(&tid, Some(tomorrow));
+                            self.active_modal = ActiveModal::None;
+                            return;
+                        }
+                        ('s', 'n') => {
+                            self.prop_sequence.clear();
+                            let next_week = (Local::now() + ChronoDuration::days(7))
+                                .format("%Y-%m-%d")
+                                .to_string();
+                            self.schedule_task(&tid, Some(next_week));
+                            self.active_modal = ActiveModal::None;
+                            return;
+                        }
+                        ('m', 't') => {
+                            self.prop_sequence.clear();
+                            self.move_task_edge(&tid, true);
+                            self.active_modal = ActiveModal::None;
+                            return;
+                        }
+                        ('m', 'b') => {
+                            self.prop_sequence.clear();
+                            self.move_task_edge(&tid, false);
+                            self.active_modal = ActiveModal::None;
+                            return;
+                        }
+                        ('m', 'p') => {
+                            self.prop_sequence.clear();
+                            self.properties_mode = PropertiesMode::MoveToProject { selected: 0 };
+                            return;
+                        }
+                        ('a', 's') => {
+                            self.prop_sequence.clear();
+                            self.add_task_state = AddTaskState {
+                                parent_id: Some(tid),
+                                ..AddTaskState::default()
+                            };
+                            self.active_modal = ActiveModal::AddTask;
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if matches!(ch, 's' | 'm' | 'a') {
+                    return;
+                }
+
+                self.prop_sequence.clear();
+                match ch {
+                    'r' => self.start_rename_selected_task(),
+                    'u' => {
+                        self.schedule_task(&tid, None);
+                        self.active_modal = ActiveModal::None;
+                    }
+                    'R' => {
+                        self.status_message = "Reschedule: not implemented yet".to_string();
+                        self.active_modal = ActiveModal::None;
+                    }
+                    'd' => {
+                        if let Some(orig) = self.tasks.iter().find(|t| t.id == tid).cloned() {
+                            let payload = CreateTaskPayload {
+                                title: format!("{} (copy)", orig.title),
+                                notes: orig.notes,
+                                project_id: orig.project_id,
+                                parent_id: orig.parent_id,
+                                tag_ids: orig.tag_ids,
+                                due_day: orig.due_day,
+                                time_estimate: orig.time_estimate,
+                                is_add_to_top: Some(false),
+                            };
+                            self.spawn_create(payload, false);
+                        }
+                        self.active_modal = ActiveModal::None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn schedule_task(&mut self, tid: &str, due_day: Option<String>) {
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == tid) {
+            let prev_due = t.due_day.clone();
+            t.due_day = due_day.clone();
+            self.push_undo(UndoOp::ScheduleTask {
+                id: tid.to_string(),
+                prev_due,
+                new_due: due_day.clone(),
+            });
+            self.spawn_patch(tid.to_string(), json!({ "dueDay": due_day }));
+        }
+    }
+
+    fn move_task_edge(&mut self, tid: &str, to_top: bool) {
+        if let Some(cur) = self.tasks.iter().position(|t| t.id == tid) {
+            let item = self.tasks.remove(cur);
+            let new_idx = if to_top { 0 } else { self.tasks.len() };
+            self.tasks.insert(new_idx, item);
+            self.push_undo(UndoOp::MoveIndex {
+                id: tid.to_string(),
+                prev_idx: cur,
+                new_idx,
+            });
+            self.task_selected = if to_top {
+                0
+            } else {
+                self.filtered_tasks().len().saturating_sub(1)
+            };
         }
     }
 
@@ -824,7 +1538,7 @@ impl App {
             }
             KeyCode::Esc => {
                 self.jk_tracker = JkEscapeTracker::default();
-                self.renaming_task_id = None;
+                self.rename_target = None;
                 self.rename_buffer.clear();
             }
             KeyCode::Backspace => {
@@ -847,24 +1561,68 @@ impl App {
     }
 
     fn commit_rename(&mut self) {
-        if let Some(id) = self.renaming_task_id.take() {
-            let new_title = self.rename_buffer.trim().to_string();
-            self.rename_buffer.clear();
-            if new_title.is_empty() {
-                return;
-            }
-            let client = self.client.clone();
-            let tx = self.api_tx.clone();
-            tokio::spawn(async move {
-                match client.rename_task(&id, &new_title).await {
-                    Ok(t) => {
-                        let _ = tx.send(ApiEvent::TaskUpdated(t));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(ApiEvent::Error(format!("Rename failed: {e}")));
-                    }
+        let Some(target) = self.rename_target.take() else {
+            return;
+        };
+        let new_title = self.rename_buffer.trim().to_string();
+        self.rename_buffer.clear();
+        if new_title.is_empty() {
+            return;
+        }
+        let client = self.client.clone();
+        let tx = self.api_tx.clone();
+        match target {
+            RenameTarget::Task(id) => {
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
+                    let prev_title = t.title.clone();
+                    t.title = new_title.clone();
+                    self.push_undo(UndoOp::RenameTask {
+                        id: id.clone(),
+                        prev_title,
+                        new_title: new_title.clone(),
+                    });
                 }
-            });
+                tokio::spawn(async move {
+                    match client.rename_task(&id, &new_title).await {
+                        Ok(t) => {
+                            let _ = tx.send(ApiEvent::TaskUpdated(t));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ApiEvent::Error(format!("Rename failed: {e}")));
+                        }
+                    }
+                });
+            }
+            RenameTarget::Project(id) => {
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
+                    p.title = new_title.clone();
+                }
+                tokio::spawn(async move {
+                    match client.rename_project(&id, &new_title).await {
+                        Ok(p) => {
+                            let _ = tx.send(ApiEvent::ProjectUpdated(p));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ApiEvent::Error(format!("Rename project failed: {e}")));
+                        }
+                    }
+                });
+            }
+            RenameTarget::Tag(id) => {
+                if let Some(t) = self.tags.iter_mut().find(|t| t.id == id) {
+                    t.title = new_title.clone();
+                }
+                tokio::spawn(async move {
+                    match client.rename_tag(&id, &new_title).await {
+                        Ok(t) => {
+                            let _ = tx.send(ApiEvent::TagUpdated(t));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ApiEvent::Error(format!("Rename tag failed: {e}")));
+                        }
+                    }
+                });
+            }
         }
     }
 
@@ -932,25 +1690,179 @@ impl App {
         }
     }
 
+    fn update_title_completion(&mut self) {
+        if self.add_task_state.active_field != AddTaskField::Title {
+            self.add_task_state.completion = None;
+            return;
+        }
+        let title = &self.add_task_state.title;
+        let last_word_start = title.rfind(' ').map(|i| i + 1).unwrap_or(0);
+        let token = &title[last_word_start..];
+        if let Some(prefix) = token.strip_prefix('#') {
+            let p_low = prefix.to_lowercase();
+            let items: Vec<String> = self
+                .tags
+                .iter()
+                .filter(|t| p_low.is_empty() || t.title.to_lowercase().contains(&p_low))
+                .map(|t| t.title.clone())
+                .collect();
+            if items.is_empty() {
+                self.add_task_state.completion = None;
+            } else {
+                self.add_task_state.completion = Some(CompletionPopup {
+                    kind: CompletionKind::Tag,
+                    items,
+                    selected: 0,
+                    trigger_start: last_word_start,
+                });
+            }
+        } else if let Some(prefix) = token.strip_prefix('@') {
+            let p_low = prefix.to_lowercase();
+            let presets = ["today", "tomorrow", "15m", "30m", "1h", "2h"];
+            let items: Vec<String> = presets
+                .iter()
+                .filter(|s| p_low.is_empty() || s.starts_with(&p_low))
+                .map(|s| (*s).to_string())
+                .collect();
+            if items.is_empty() {
+                self.add_task_state.completion = None;
+            } else {
+                self.add_task_state.completion = Some(CompletionPopup {
+                    kind: CompletionKind::Time,
+                    items,
+                    selected: 0,
+                    trigger_start: last_word_start,
+                });
+            }
+        } else {
+            self.add_task_state.completion = None;
+        }
+    }
+
+    fn accept_completion(&mut self) {
+        let Some(comp) = self.add_task_state.completion.take() else {
+            return;
+        };
+        let Some(choice) = comp.items.get(comp.selected).cloned() else {
+            return;
+        };
+        let prefix_char = match comp.kind {
+            CompletionKind::Tag => {
+                if let Some(tag) = self.tags.iter().find(|t| t.title == choice)
+                    && !self.add_task_state.selected_tag_ids.contains(&tag.id)
+                {
+                    self.add_task_state.selected_tag_ids.push(tag.id.clone());
+                }
+                '#'
+            }
+            CompletionKind::Time => '@',
+        };
+        self.add_task_state.title.truncate(comp.trigger_start);
+        self.add_task_state
+            .title
+            .push_str(&format!("{prefix_char}{choice} "));
+    }
+
+    fn parse_inline_tokens(
+        &self,
+        raw_title: &str,
+    ) -> (String, Vec<String>, Option<String>, Option<u64>) {
+        let mut clean_words = Vec::new();
+        let mut tag_ids = self.add_task_state.selected_tag_ids.clone();
+        let mut due_day = None;
+        let mut time_estimate = None;
+
+        for word in raw_title.split_whitespace() {
+            if let Some(tag_name) = word.strip_prefix('#') {
+                if let Some(tag) = self
+                    .tags
+                    .iter()
+                    .find(|t| t.title.eq_ignore_ascii_case(tag_name))
+                {
+                    if !tag_ids.contains(&tag.id) {
+                        tag_ids.push(tag.id.clone());
+                    }
+                } else {
+                    clean_words.push(word);
+                }
+            } else if let Some(time_tok) = word.strip_prefix('@') {
+                match time_tok.to_lowercase().as_str() {
+                    "today" => due_day = Some(Local::now().format("%Y-%m-%d").to_string()),
+                    "tomorrow" => {
+                        due_day = Some(
+                            (Local::now() + ChronoDuration::days(1))
+                                .format("%Y-%m-%d")
+                                .to_string(),
+                        )
+                    }
+                    "15m" => time_estimate = Some(15 * 60_000),
+                    "30m" => time_estimate = Some(30 * 60_000),
+                    "1h" => time_estimate = Some(60 * 60_000),
+                    "2h" => time_estimate = Some(120 * 60_000),
+                    _ => clean_words.push(word),
+                }
+            } else {
+                clean_words.push(word);
+            }
+        }
+        (clean_words.join(" "), tag_ids, due_day, time_estimate)
+    }
+
     fn handle_add_task_key(&mut self, key: KeyEvent) {
+        if let Some(ref mut comp) = self.add_task_state.completion {
+            match key.code {
+                KeyCode::Esc => {
+                    self.add_task_state.completion = None;
+                    return;
+                }
+                KeyCode::Down => {
+                    if comp.selected + 1 < comp.items.len() {
+                        comp.selected += 1;
+                    }
+                    return;
+                }
+                KeyCode::Up => {
+                    if comp.selected > 0 {
+                        comp.selected -= 1;
+                    }
+                    return;
+                }
+                KeyCode::Tab => {
+                    self.accept_completion();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Esc => self.active_modal = ActiveModal::None,
             KeyCode::Tab | KeyCode::Down => {
                 self.add_task_state.active_field = self.add_task_state.active_field.next();
+                self.add_task_state.completion = None;
             }
             KeyCode::BackTab | KeyCode::Up => {
                 self.add_task_state.active_field = self.add_task_state.active_field.prev();
+                self.add_task_state.completion = None;
             }
             KeyCode::Enter => {
-                let title = self.add_task_state.title.trim().to_string();
+                let raw_title = self.add_task_state.title.trim().to_string();
+                if raw_title.is_empty() {
+                    return;
+                }
+                let (title, tag_ids, due_day, time_estimate) = self.parse_inline_tokens(&raw_title);
                 if title.is_empty() {
                     return;
                 }
-                let notes = if self.add_task_state.note.trim().is_empty() {
-                    None
-                } else {
-                    Some(self.add_task_state.note.clone())
-                };
+                let mut notes = self.add_task_state.note.trim().to_string();
+                if self.add_task_state.repeat != RepeatOption::None {
+                    let rep_note = format!("Repeat: {}", self.add_task_state.repeat.label());
+                    if notes.is_empty() {
+                        notes = rep_note;
+                    } else {
+                        notes = format!("{notes}\n{rep_note}");
+                    }
+                }
                 let project_id = if self.add_task_state.project_idx == 0 {
                     None
                 } else {
@@ -960,15 +1872,18 @@ impl App {
                 };
                 let to_top = self.add_task_state.add_to_top;
                 let payload = CreateTaskPayload {
-                    title,
-                    notes,
+                    title: title.clone(),
+                    notes: if notes.is_empty() { None } else { Some(notes) },
                     project_id,
-                    tag_ids: self.add_task_state.selected_tag_ids.clone(),
+                    parent_id: self.add_task_state.parent_id.clone(),
+                    tag_ids,
+                    due_day,
+                    time_estimate,
                     is_add_to_top: Some(to_top),
                 };
+                self.active_modal = ActiveModal::None;
                 let client = self.client.clone();
                 let tx = self.api_tx.clone();
-                self.active_modal = ActiveModal::None;
                 tokio::spawn(async move {
                     match client.create_task(payload).await {
                         Ok(t) => {
@@ -984,6 +1899,9 @@ impl App {
                 AddTaskField::Position => {
                     self.add_task_state.add_to_top = !self.add_task_state.add_to_top;
                 }
+                AddTaskField::Repeat => {
+                    self.add_task_state.repeat = self.add_task_state.repeat.prev();
+                }
                 AddTaskField::Project if self.add_task_state.project_idx > 0 => {
                     self.add_task_state.project_idx -= 1;
                 }
@@ -996,6 +1914,9 @@ impl App {
                 AddTaskField::Position => {
                     self.add_task_state.add_to_top = !self.add_task_state.add_to_top;
                 }
+                AddTaskField::Repeat => {
+                    self.add_task_state.repeat = self.add_task_state.repeat.next();
+                }
                 AddTaskField::Project if self.add_task_state.project_idx < self.projects.len() => {
                     self.add_task_state.project_idx += 1;
                 }
@@ -1007,6 +1928,9 @@ impl App {
             KeyCode::Char(' ') => match self.add_task_state.active_field {
                 AddTaskField::Position => {
                     self.add_task_state.add_to_top = !self.add_task_state.add_to_top;
+                }
+                AddTaskField::Repeat => {
+                    self.add_task_state.repeat = self.add_task_state.repeat.next();
                 }
                 AddTaskField::Tags => {
                     if let Some(tag) = self.tags.get(self.add_task_state.tag_cursor) {
@@ -1022,13 +1946,17 @@ impl App {
                         }
                     }
                 }
-                AddTaskField::Title => self.add_task_state.title.push(' '),
+                AddTaskField::Title => {
+                    self.add_task_state.title.push(' ');
+                    self.update_title_completion();
+                }
                 AddTaskField::Note => self.add_task_state.note.push(' '),
                 AddTaskField::Project => {}
             },
             KeyCode::Backspace => match self.add_task_state.active_field {
                 AddTaskField::Title => {
                     self.add_task_state.title.pop();
+                    self.update_title_completion();
                 }
                 AddTaskField::Note => {
                     self.add_task_state.note.pop();
@@ -1036,10 +1964,94 @@ impl App {
                 _ => {}
             },
             KeyCode::Char(c) => match self.add_task_state.active_field {
-                AddTaskField::Title => self.add_task_state.title.push(c),
+                AddTaskField::Title => {
+                    self.add_task_state.title.push(c);
+                    self.update_title_completion();
+                }
                 AddTaskField::Note => self.add_task_state.note.push(c),
                 _ => {}
             },
+            _ => {}
+        }
+    }
+
+    fn handle_theme_key(&mut self, key: KeyEvent) {
+        let Some(ref mut ed) = self.theme_editor else {
+            self.active_modal = ActiveModal::None;
+            return;
+        };
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+            let tpl = ed.editing.clone();
+            if let Some(existing) = self
+                .config
+                .saved_themes
+                .iter_mut()
+                .find(|t| t.name == tpl.name)
+            {
+                *existing = tpl.clone();
+            } else {
+                self.config.saved_themes.push(tpl.clone());
+            }
+            self.config.theme = tpl;
+            let _ = self.config.save();
+            self.status_message = "Theme template saved".to_string();
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.config.theme = ed.original.clone();
+                self.theme_editor = None;
+                self.active_modal = ActiveModal::None;
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                ed.field_idx = (ed.field_idx + 1) % ThemeEditorState::FIELD_LABELS.len();
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                ed.field_idx = if ed.field_idx == 0 {
+                    ThemeEditorState::FIELD_LABELS.len() - 1
+                } else {
+                    ed.field_idx - 1
+                };
+            }
+            KeyCode::Left if ed.field_idx == 0 => {
+                let mut all = ThemeConfig::builtin_themes();
+                all.extend(self.config.saved_themes.iter().cloned());
+                if !all.is_empty() {
+                    ed.preset_idx = if ed.preset_idx == 0 {
+                        all.len() - 1
+                    } else {
+                        ed.preset_idx - 1
+                    };
+                    ed.editing = all[ed.preset_idx].clone();
+                    self.config.theme = ed.editing.clone();
+                }
+            }
+            KeyCode::Right if ed.field_idx == 0 => {
+                let mut all = ThemeConfig::builtin_themes();
+                all.extend(self.config.saved_themes.iter().cloned());
+                if !all.is_empty() {
+                    ed.preset_idx = (ed.preset_idx + 1) % all.len();
+                    ed.editing = all[ed.preset_idx].clone();
+                    self.config.theme = ed.editing.clone();
+                }
+            }
+            KeyCode::Enter => {
+                self.config.theme = ed.editing.clone();
+                let _ = self.config.save();
+                self.theme_editor = None;
+                self.active_modal = ActiveModal::None;
+                self.status_message = "Theme applied".to_string();
+            }
+            KeyCode::Backspace => {
+                ed.field_value_mut().pop();
+                self.config.theme = ed.editing.clone();
+            }
+            KeyCode::Char(c) => {
+                ed.field_value_mut().push(c);
+                self.config.theme = ed.editing.clone();
+            }
             _ => {}
         }
     }
@@ -1062,5 +2074,33 @@ mod tests {
         release.kind = KeyEventKind::Release;
         app.handle_key(release);
         assert_eq!(app.nav_selected, 1);
+    }
+
+    #[tokio::test]
+    async fn undo_and_redo_toggle_done() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        app.tasks.push(Task {
+            id: "t1".into(),
+            title: "Task 1".into(),
+            is_done: false,
+            notes: None,
+            project_id: None,
+            parent_id: None,
+            tag_ids: vec![],
+            due_day: None,
+            time_estimate: None,
+            repeat_cfg_id: None,
+        });
+        app.push_undo(UndoOp::ToggleDone {
+            id: "t1".into(),
+            prev_done: false,
+        });
+        app.tasks[0].is_done = true;
+
+        app.undo();
+        assert!(!app.tasks[0].is_done);
+        app.redo();
+        assert!(app.tasks[0].is_done);
     }
 }
