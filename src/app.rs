@@ -1254,6 +1254,22 @@ impl App {
         }
     }
 
+    fn default_add_task_state(&self) -> AddTaskState {
+        let mut st = AddTaskState::default();
+        match &self.active_filter {
+            NavFilter::Project(pid) => {
+                if let Some(idx) = self.projects.iter().position(|p| &p.id == pid) {
+                    st.project_idx = idx + 1;
+                }
+            }
+            NavFilter::Tag(tid) => {
+                st.selected_tag_ids.push(tid.clone());
+            }
+            _ => {}
+        }
+        st
+    }
+
     fn handle_add_shortcut(&mut self) {
         if self.focus == FocusSection::Nav
             && let Some(row) = self.all_nav_rows().get(self.nav_selected)
@@ -1272,7 +1288,7 @@ impl App {
                 _ => {}
             }
         }
-        self.add_task_state = AddTaskState::default();
+        self.add_task_state = self.default_add_task_state();
         self.active_modal = ActiveModal::AddTask;
     }
 
@@ -2599,5 +2615,23 @@ mod tests {
         assert_eq!(app.active_modal, ActiveModal::Properties);
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         assert_eq!(app.active_modal, ActiveModal::None);
+    }
+
+    #[test]
+    fn add_task_preselects_active_project() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        app.projects.push(Project {
+            id: "p1".into(),
+            title: "Work".into(),
+            theme: None,
+            color: None,
+        });
+        app.active_filter = NavFilter::Project("p1".into());
+        app.focus = FocusSection::Main;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.active_modal, ActiveModal::AddTask);
+        assert_eq!(app.add_task_state.project_idx, 1);
     }
 }
