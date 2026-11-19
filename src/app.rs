@@ -281,7 +281,7 @@ pub struct ThemeEditorState {
 }
 
 impl ThemeEditorState {
-    pub const FIELD_LABELS: [&'static str; 12] = [
+    pub const FIELD_LABELS: [&'static str; 13] = [
         "Preset / Name",
         "Background (bg)",
         "Sidebar Bg",
@@ -294,6 +294,7 @@ impl ThemeEditorState {
         "Warning",
         "Danger",
         "Selection Bg",
+        "Hint Fg",
     ];
 
     pub fn new(current: &ThemeConfig, saved: &[ThemeConfig]) -> Self {
@@ -321,7 +322,8 @@ impl ThemeEditorState {
             8 => &mut self.editing.success,
             9 => &mut self.editing.warning,
             10 => &mut self.editing.danger,
-            _ => &mut self.editing.selection_bg,
+            11 => &mut self.editing.selection_bg,
+            _ => &mut self.editing.hint_fg,
         }
     }
 
@@ -338,7 +340,8 @@ impl ThemeEditorState {
             8 => &self.editing.success,
             9 => &self.editing.warning,
             10 => &self.editing.danger,
-            _ => &self.editing.selection_bg,
+            11 => &self.editing.selection_bg,
+            _ => &self.editing.hint_fg,
         }
     }
 }
@@ -429,6 +432,7 @@ pub struct App {
     pub tags_expanded: bool,
     pub nav_selected: usize,
     pub task_selected: usize,
+    pub task_scroll: usize,
 
     pub tasks: Vec<Task>,
     pub projects: Vec<Project>,
@@ -484,6 +488,7 @@ impl App {
             tags_expanded: true,
             nav_selected: 0,
             task_selected: 0,
+            task_scroll: 0,
             tasks: Vec::new(),
             projects: Vec::new(),
             tags: Vec::new(),
@@ -826,8 +831,23 @@ impl App {
             .collect()
     }
 
+    pub fn visible_task_rows(&self) -> Vec<(&Task, bool)> {
+        let mut rows = Vec::new();
+        for task in self.filtered_tasks() {
+            rows.push((task, false));
+            if self.expanded_subtasks.contains(&task.id) {
+                for sub in self.subtasks_for(&task.id) {
+                    rows.push((sub, true));
+                }
+            }
+        }
+        rows
+    }
+
     pub fn selected_task(&self) -> Option<&Task> {
-        self.filtered_tasks().get(self.task_selected).copied()
+        self.visible_task_rows()
+            .get(self.task_selected)
+            .map(|(t, _)| *t)
     }
 
     fn clamp_selections(&mut self) {
@@ -838,9 +858,10 @@ impl App {
             self.nav_selected = nav_len - 1;
         }
 
-        let task_len = self.filtered_tasks().len();
+        let task_len = self.visible_task_rows().len();
         if task_len == 0 {
             self.task_selected = 0;
+            self.task_scroll = 0;
         } else if self.task_selected >= task_len {
             self.task_selected = task_len - 1;
         }
@@ -1192,7 +1213,7 @@ impl App {
                 }
             }
             FocusSection::Main => {
-                let len = self.filtered_tasks().len();
+                let len = self.visible_task_rows().len();
                 if self.task_selected + 1 < len {
                     self.task_selected += 1;
                 }
@@ -1203,7 +1224,10 @@ impl App {
     fn move_to_top(&mut self) {
         match self.focus {
             FocusSection::Nav => self.nav_selected = 0,
-            FocusSection::Main => self.task_selected = 0,
+            FocusSection::Main => {
+                self.task_selected = 0;
+                self.task_scroll = 0;
+            }
         }
     }
 
@@ -1213,7 +1237,7 @@ impl App {
                 self.nav_selected = self.all_nav_rows().len().saturating_sub(1);
             }
             FocusSection::Main => {
-                self.task_selected = self.filtered_tasks().len().saturating_sub(1);
+                self.task_selected = self.visible_task_rows().len().saturating_sub(1);
             }
         }
     }
@@ -2415,8 +2439,28 @@ impl App {
                                 let _ = tx.send(ApiEvent::ProjectCreated(p));
                             }
                             Err(e) => {
-                                let _ =
-                                    tx.send(ApiEvent::Error(format!("Create project failed: {e}")));
+                                let msg = e.to_string();
+                                if msg.contains("Route not found") || msg.contains("NOT_FOUND") {
+                                    let _ = tx.send(ApiEvent::ProjectCreated(Project {
+                                        id: format!(
+                                            "local-proj-{}",
+                                            Local::now().timestamp_millis()
+                                        ),
+                                        title,
+                                        theme: Some(crate::models::EntityTheme {
+                                            primary: Some(color),
+                                        }),
+                                        color: None,
+                                    }));
+                                    let _ = tx.send(ApiEvent::Error(
+                                        "Added locally (SP REST API has no POST /projects)"
+                                            .to_string(),
+                                    ));
+                                } else {
+                                    let _ = tx.send(ApiEvent::Error(format!(
+                                        "Create project failed: {e}"
+                                    )));
+                                }
                             }
                         },
                         AddEntityKind::Tag => match client.create_tag(&title, &color).await {
@@ -2424,7 +2468,24 @@ impl App {
                                 let _ = tx.send(ApiEvent::TagCreated(t));
                             }
                             Err(e) => {
-                                let _ = tx.send(ApiEvent::Error(format!("Create tag failed: {e}")));
+                                let msg = e.to_string();
+                                if msg.contains("Route not found") || msg.contains("NOT_FOUND") {
+                                    let _ = tx.send(ApiEvent::TagCreated(Tag {
+                                        id: format!(
+                                            "local-tag-{}",
+                                            Local::now().timestamp_millis()
+                                        ),
+                                        title,
+                                        color: Some(color),
+                                        theme: None,
+                                    }));
+                                    let _ = tx.send(ApiEvent::Error(
+                                        "Added locally (SP REST API has no POST /tags)".to_string(),
+                                    ));
+                                } else {
+                                    let _ =
+                                        tx.send(ApiEvent::Error(format!("Create tag failed: {e}")));
+                                }
                             }
                         },
                     }

@@ -18,6 +18,12 @@ pub struct ThemeConfig {
     pub warning: String,
     pub danger: String,
     pub selection_bg: String,
+    #[serde(default = "default_hint_fg")]
+    pub hint_fg: String,
+}
+
+fn default_hint_fg() -> String {
+    "#eab308".to_string()
 }
 
 fn default_sidebar_bg() -> String {
@@ -50,6 +56,7 @@ impl ThemeConfig {
                 warning: "#eab308".to_string(),
                 danger: "#ef4444".to_string(),
                 selection_bg: "#374151".to_string(),
+                hint_fg: "#eab308".to_string(),
             },
             Self {
                 name: "Catppuccin Mocha".to_string(),
@@ -64,6 +71,7 @@ impl ThemeConfig {
                 warning: "#f9e2af".to_string(),
                 danger: "#f38ba8".to_string(),
                 selection_bg: "#313244".to_string(),
+                hint_fg: "#f9e2af".to_string(),
             },
             Self {
                 name: "Gruvbox Dark".to_string(),
@@ -78,6 +86,7 @@ impl ThemeConfig {
                 warning: "#fabd2f".to_string(),
                 danger: "#fb4934".to_string(),
                 selection_bg: "#3c3836".to_string(),
+                hint_fg: "#fabd2f".to_string(),
             },
             Self {
                 name: "Tokyo Night".to_string(),
@@ -92,6 +101,7 @@ impl ThemeConfig {
                 warning: "#e0af68".to_string(),
                 danger: "#f7768e".to_string(),
                 selection_bg: "#283457".to_string(),
+                hint_fg: "#e0af68".to_string(),
             },
             Self {
                 name: "Nord".to_string(),
@@ -106,6 +116,7 @@ impl ThemeConfig {
                 warning: "#ebcb8b".to_string(),
                 danger: "#bf616a".to_string(),
                 selection_bg: "#3b4252".to_string(),
+                hint_fg: "#ebcb8b".to_string(),
             },
         ]
     }
@@ -152,5 +163,9 @@ impl ThemeConfig {
 
     pub fn selection_bg_color(&self) -> Color {
         parse_hex_color(&self.selection_bg).unwrap_or(Color::DarkGray)
+    }
+
+    pub fn hint_fg_color(&self) -> Color {
+        parse_hex_color(&self.hint_fg).unwrap_or(Color::Yellow)
     }
 }

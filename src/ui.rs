@@ -13,7 +13,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 /// Underlines specific character indices when `hint` is enabled.
-pub fn hint_indices(text: &str, hint: bool, indices: &[usize], base: Style) -> Vec<Span<'static>> {
+pub fn hint_indices(
+    text: &str,
+    hint: bool,
+    indices: &[usize],
+    base: Style,
+    hint_color: Color,
+) -> Vec<Span<'static>> {
     if !hint {
         return vec![Span::styled(text.to_string(), base)];
     }
@@ -26,7 +32,7 @@ pub fn hint_indices(text: &str, hint: bool, indices: &[usize], base: Style) -> V
             }
             spans.push(Span::styled(
                 ch.to_string(),
-                base.add_modifier(Modifier::UNDERLINED),
+                base.fg(hint_color).add_modifier(Modifier::UNDERLINED),
             ));
         } else {
             buf.push(ch);
@@ -39,7 +45,7 @@ pub fn hint_indices(text: &str, hint: bool, indices: &[usize], base: Style) -> V
 }
 
 /// Underlines the first character of each word when `hint` is enabled.
-pub fn hint_spans(text: &str, hint: bool, base: Style) -> Vec<Span<'static>> {
+pub fn hint_spans(text: &str, hint: bool, base: Style, hint_color: Color) -> Vec<Span<'static>> {
     if !hint {
         return vec![Span::styled(text.to_string(), base)];
     }
@@ -57,7 +63,7 @@ pub fn hint_spans(text: &str, hint: bool, base: Style) -> Vec<Span<'static>> {
             }
             spans.push(Span::styled(
                 ch.to_string(),
-                base.add_modifier(Modifier::UNDERLINED),
+                base.fg(hint_color).add_modifier(Modifier::UNDERLINED),
             ));
             at_word_start = false;
         } else {
@@ -322,22 +328,60 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(Paragraph::new(search_line), search_area);
     }
 
-    let mut task_rows = Vec::new();
-    let mut row_y = list_area.y;
-
-    for (idx, task) in tasks.iter().enumerate() {
-        if row_y >= list_area.bottom() {
-            break;
+    let visible_h = list_area.height as usize;
+    if visible_h > 0 {
+        if app.task_selected < app.task_scroll {
+            app.task_scroll = app.task_selected;
+        } else if app.task_selected >= app.task_scroll + visible_h {
+            app.task_scroll = app.task_selected + 1 - visible_h;
         }
+    }
+    let rows = app.visible_task_rows();
+
+    let mut task_rows = Vec::new();
+
+    for (row_y, (idx, (task, is_subtask))) in
+        (list_area.y..list_area.bottom()).zip(rows.iter().enumerate().skip(app.task_scroll))
+    {
         let row_rect = Rect::new(list_area.x, row_y, list_area.width, 1);
         task_rows.push((row_rect, idx));
-        row_y += 1;
 
         let is_selected = app.focus == FocusSection::Main && app.task_selected == idx;
         let is_renaming = matches!(
             &app.rename_target,
             Some(crate::app::RenameTarget::Task(id)) if id == &task.id
         );
+
+        let checkbox = if task.is_done { "\u{f046}" } else { "\u{f096}" };
+
+        if *is_subtask {
+            let mut sub_style = Style::default().fg(app.config.theme.muted_color());
+            if task.is_done {
+                sub_style = sub_style.add_modifier(Modifier::CROSSED_OUT);
+            }
+            if is_selected {
+                sub_style = sub_style
+                    .fg(app.config.theme.fg_color())
+                    .bg(app.config.theme.selection_bg_color());
+            }
+            if is_renaming {
+                sub_style = Style::default()
+                    .fg(app.config.theme.success_color())
+                    .add_modifier(Modifier::BOLD);
+            }
+            let title_text = if is_renaming {
+                format!("{}|", app.rename_buffer)
+            } else {
+                task.title.clone()
+            };
+            let line = format!("    {checkbox} {title_text}");
+            let pad = (row_rect.width as usize).saturating_sub(line.chars().count());
+            frame.render_widget(
+                Paragraph::new(format!("{line}{}", " ".repeat(pad))).style(sub_style),
+                row_rect,
+            );
+            continue;
+        }
 
         let subtasks = app.subtasks_for(&task.id);
         let sub_expanded = app.expanded_subtasks.contains(&task.id);
@@ -349,7 +393,6 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
             format!(" ▸({})", subtasks.len())
         };
 
-        let checkbox = if task.is_done { "\u{f046}" } else { "\u{f096}" };
         let is_tracking = app.current_task_id.as_deref() == Some(task.id.as_str());
         let tracking_prefix = if is_tracking { "\u{f04b} " } else { "" };
         let title_text = if is_renaming {
@@ -440,21 +483,6 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         frame.render_widget(Paragraph::new(Line::from(spans)), row_rect);
-
-        if sub_expanded {
-            for sub in subtasks {
-                if row_y >= list_area.bottom() {
-                    break;
-                }
-                let sub_rect = Rect::new(list_area.x, row_y, list_area.width, 1);
-                row_y += 1;
-                frame.render_widget(
-                    Paragraph::new(format!("    • {}", sub.title))
-                        .style(Style::default().fg(app.config.theme.muted_color())),
-                    sub_rect,
-                );
-            }
-        }
     }
     app.areas.task_rows = task_rows;
 
@@ -603,13 +631,14 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     let hint = app.config.hint_keybind;
     let base = Style::default().fg(app.config.theme.fg_color());
+    let hc = app.config.theme.hint_fg_color();
 
     let (title, lines) = match &app.properties_target {
         Some(PropertiesTarget::Project(_)) => (
             " Project Properties ",
             vec![
-                Line::from(hint_spans("rename", hint, base)),
-                Line::from(hint_spans("delete", hint, base)),
+                Line::from(hint_spans("rename", hint, base, hc)),
+                Line::from(hint_spans("delete", hint, base, hc)),
                 Line::from(""),
                 Line::from(Span::styled(
                     "Esc to close",
@@ -620,8 +649,8 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
         Some(PropertiesTarget::Tag(_)) => (
             " Tag Properties ",
             vec![
-                Line::from(hint_spans("rename", hint, base)),
-                Line::from(hint_spans("delete", hint, base)),
+                Line::from(hint_spans("rename", hint, base, hc)),
+                Line::from(hint_spans("delete", hint, base, hc)),
                 Line::from(""),
                 Line::from(Span::styled(
                     "Esc to close",
@@ -632,17 +661,17 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
         _ => (
             " Task Properties ",
             vec![
-                Line::from(hint_spans("rename", hint, base)),
-                Line::from(hint_indices("schedule today", hint, &[0, 11], base)),
-                Line::from(hint_indices("schedule tommorow", hint, &[0, 11], base)),
-                Line::from(hint_spans("schedule next week", hint, base)),
-                Line::from(hint_spans("unschedule", hint, base)),
-                Line::from(hint_spans("Reschedule", hint, base)),
-                Line::from(hint_indices("move to top", hint, &[0, 8], base)),
-                Line::from(hint_indices("move to bottom", hint, &[0, 8], base)),
-                Line::from(hint_spans("add subtask", hint, base)),
-                Line::from(hint_spans("duplicate", hint, base)),
-                Line::from(hint_indices("move to project", hint, &[0, 8], base)),
+                Line::from(hint_spans("rename", hint, base, hc)),
+                Line::from(hint_indices("schedule today", hint, &[0, 11], base, hc)),
+                Line::from(hint_indices("schedule tommorow", hint, &[0, 11], base, hc)),
+                Line::from(hint_spans("schedule next week", hint, base, hc)),
+                Line::from(hint_spans("unschedule", hint, base, hc)),
+                Line::from(hint_spans("Reschedule", hint, base, hc)),
+                Line::from(hint_indices("move to top", hint, &[0, 8], base, hc)),
+                Line::from(hint_indices("move to bottom", hint, &[0, 8], base, hc)),
+                Line::from(hint_spans("add subtask", hint, base, hc)),
+                Line::from(hint_spans("duplicate", hint, base, hc)),
+                Line::from(hint_indices("move to project", hint, &[0, 8], base, hc)),
                 Line::from(""),
                 Line::from(Span::styled(
                     "Type underlined shortcut | Esc or jk to close",
@@ -981,13 +1010,13 @@ fn render_theme_modal(frame: &mut Frame, app: &App, area: Rect) {
     let Some(ed) = &app.theme_editor else {
         return;
     };
-    let popup = centered_rect(68, 20, area);
+    let popup = centered_rect(68, 21, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
         .title(" Colorscheme / Theme (:c) ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.config.theme.accent_color()))
+        .border_style(Style::default().fg(app.config.theme.border_color()))
         .padding(Padding::uniform(1));
 
     let inner = block.inner(popup);
@@ -1132,57 +1161,126 @@ fn markdown_lines(text: &str, theme: &crate::theme::ThemeConfig) -> Vec<Line<'st
     text.lines()
         .map(|line| {
             let trimmed = line.trim_start();
-            if let Some(h) = trimmed.strip_prefix("# ") {
+            if let Some(h) = trimmed.strip_prefix("### ") {
                 Line::from(Span::styled(
                     h.to_string(),
-                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    Style::default().fg(success).add_modifier(Modifier::BOLD),
                 ))
             } else if let Some(h) = trimmed.strip_prefix("## ") {
                 Line::from(Span::styled(
                     h.to_string(),
                     Style::default().fg(warning).add_modifier(Modifier::BOLD),
                 ))
+            } else if let Some(h) = trimmed.strip_prefix("# ") {
+                Line::from(Span::styled(
+                    h.to_string(),
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ))
             } else if let Some(b) = trimmed
                 .strip_prefix("- ")
                 .or_else(|| trimmed.strip_prefix("* "))
             {
-                Line::from(vec![
-                    Span::styled("  • ", Style::default().fg(accent)),
-                    Span::styled(b.to_string(), Style::default().fg(fg)),
-                ])
-            } else {
-                let mut spans = Vec::new();
-                let mut rest = line;
-                while let Some(start) = rest.find('`') {
-                    if start > 0 {
-                        spans.push(Span::styled(
-                            rest[..start].to_string(),
-                            Style::default().fg(fg),
-                        ));
-                    }
-                    let after = &rest[start + 1..];
-                    if let Some(end) = after.find('`') {
-                        spans.push(Span::styled(
-                            after[..end].to_string(),
-                            Style::default().fg(success).add_modifier(Modifier::BOLD),
-                        ));
-                        rest = &after[end + 1..];
-                    } else {
-                        spans.push(Span::styled(
-                            rest[start..].to_string(),
-                            Style::default().fg(fg),
-                        ));
-                        rest = "";
-                        break;
-                    }
-                }
-                if !rest.is_empty() {
-                    spans.push(Span::styled(rest.to_string(), Style::default().fg(fg)));
-                }
+                let mut spans = vec![Span::styled("  • ", Style::default().fg(accent))];
+                spans.extend(parse_inline_md(b, fg, warning, accent, success));
                 Line::from(spans)
+            } else {
+                Line::from(parse_inline_md(line, fg, warning, accent, success))
             }
         })
         .collect()
+}
+
+fn parse_inline_md(
+    input: &str,
+    fg: Color,
+    bold_fg: Color,
+    italic_fg: Color,
+    code_fg: Color,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = input;
+
+    while !rest.is_empty() {
+        let next_bold = rest.find("**");
+        let next_code = rest.find('`');
+        let next_italic = rest.find('*');
+
+        let earliest = [
+            next_bold.map(|i| (i, 0u8)),
+            next_code.map(|i| (i, 1u8)),
+            next_italic.map(|i| (i, 2u8)),
+        ]
+        .into_iter()
+        .flatten()
+        .min_by_key(|(i, kind)| (*i, *kind));
+
+        let Some((idx, kind)) = earliest else {
+            spans.push(Span::styled(rest.to_string(), Style::default().fg(fg)));
+            break;
+        };
+
+        if idx > 0 {
+            spans.push(Span::styled(
+                rest[..idx].to_string(),
+                Style::default().fg(fg),
+            ));
+        }
+
+        match kind {
+            0 => {
+                let after = &rest[idx + 2..];
+                if let Some(end) = after.find("**") {
+                    spans.push(Span::styled(
+                        after[..end].to_string(),
+                        Style::default().fg(bold_fg).add_modifier(Modifier::BOLD),
+                    ));
+                    rest = &after[end + 2..];
+                } else {
+                    spans.push(Span::styled(
+                        rest[idx..].to_string(),
+                        Style::default().fg(fg),
+                    ));
+                    break;
+                }
+            }
+            1 => {
+                let after = &rest[idx + 1..];
+                if let Some(end) = after.find('`') {
+                    spans.push(Span::styled(
+                        after[..end].to_string(),
+                        Style::default().fg(code_fg).add_modifier(Modifier::BOLD),
+                    ));
+                    rest = &after[end + 1..];
+                } else {
+                    spans.push(Span::styled(
+                        rest[idx..].to_string(),
+                        Style::default().fg(fg),
+                    ));
+                    break;
+                }
+            }
+            _ => {
+                let after = &rest[idx + 1..];
+                if let Some(end) = after.find('*') {
+                    spans.push(Span::styled(
+                        after[..end].to_string(),
+                        Style::default()
+                            .fg(italic_fg)
+                            .add_modifier(Modifier::ITALIC),
+                    ));
+                    rest = &after[end + 1..];
+                } else {
+                    spans.push(Span::styled(
+                        rest[idx..].to_string(),
+                        Style::default().fg(fg),
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+
+    spans
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -1203,9 +1301,10 @@ mod tests {
 
     #[test]
     fn hint_spans_underlines_first_letter_of_each_word() {
-        let spans = hint_spans("abc def", true, Style::default());
+        let spans = hint_spans("abc def", true, Style::default(), Color::Yellow);
         assert_eq!(spans[0].content, "a");
         assert!(spans[0].style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(spans[0].style.fg, Some(Color::Yellow));
         assert_eq!(spans[1].content, "bc ");
         assert_eq!(spans[2].content, "d");
         assert!(spans[2].style.add_modifier.contains(Modifier::UNDERLINED));
