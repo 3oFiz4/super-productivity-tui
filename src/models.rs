@@ -134,3 +134,14 @@ pub struct HealthData {
     pub server: String,
     pub renderer_ready: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimpleCounter {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub count: i64,
+    #[serde(default)]
+    pub is_on: bool,
+}

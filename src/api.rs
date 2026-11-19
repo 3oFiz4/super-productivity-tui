@@ -1,4 +1,6 @@
-use crate::models::{ApiResponse, CreateTaskPayload, HealthData, Project, Tag, Task};
+use crate::models::{
+    ApiResponse, CreateTaskPayload, HealthData, Project, SimpleCounter, Tag, Task,
+};
 use anyhow::{Context, Result, anyhow};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -82,6 +84,27 @@ impl SuperProductivityClient {
             .http
             .get(self.url("/tags"))
             .bearer_auth(&self.token)
+            .send()
+            .await?;
+        Self::parse_response(resp).await
+    }
+
+    pub async fn get_counters(&self) -> Result<Vec<SimpleCounter>> {
+        let resp = self
+            .http
+            .get(self.url("/counters"))
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        Self::parse_response(resp).await
+    }
+
+    pub async fn update_counter(&self, id: &str, count: i64) -> Result<SimpleCounter> {
+        let resp = self
+            .http
+            .patch(self.url(&format!("/counters/{id}")))
+            .bearer_auth(&self.token)
+            .json(&json!({ "count": count }))
             .send()
             .await?;
         Self::parse_response(resp).await

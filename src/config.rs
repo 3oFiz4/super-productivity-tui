@@ -1,3 +1,4 @@
+use crate::models::SimpleCounter;
 use crate::theme::ThemeConfig;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,8 @@ pub struct AppConfig {
     pub theme: ThemeConfig,
     #[serde(default)]
     pub saved_themes: Vec<ThemeConfig>,
+    #[serde(default)]
+    pub counters: Vec<SimpleCounter>,
 }
 
 impl Default for AppConfig {
@@ -60,6 +63,20 @@ impl Default for AppConfig {
             hint_keybind: true,
             theme: ThemeConfig::default(),
             saved_themes: Vec::new(),
+            counters: vec![
+                SimpleCounter {
+                    id: "habit-water".to_string(),
+                    title: "Water (glasses)".to_string(),
+                    count: 0,
+                    is_on: false,
+                },
+                SimpleCounter {
+                    id: "habit-stretch".to_string(),
+                    title: "Stretch Breaks".to_string(),
+                    count: 0,
+                    is_on: false,
+                },
+            ],
         }
     }
 }

@@ -169,3 +169,112 @@ impl ThemeConfig {
         parse_hex_color(&self.hint_fg).unwrap_or(Color::Yellow)
     }
 }
+
+pub fn parse_rgb(hex: &str) -> Option<(u8, u8, u8)> {
+    let s = hex.trim().strip_prefix('#').unwrap_or(hex.trim());
+    if s.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+pub fn format_hex(r: u8, g: u8, b: u8) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+/// Maps 2D grid `(x, y)` in `w x h` to `(r, g, b)`:
+/// X = Hue (0..360, with last column grayscale), Y = Brightness/Saturation sweep.
+pub fn map_coords_to_rgb(x: usize, y: usize, w: usize, h: usize) -> (u8, u8, u8) {
+    let w = w.max(2);
+    let h = h.max(2);
+    if x + 1 >= w {
+        let v = (255.0 * (1.0 - (y as f64) / ((h - 1) as f64))).round() as u8;
+        return (v, v, v);
+    }
+    let hue = ((x as f64) / ((w - 2) as f64)) * 360.0;
+    let ny = (y as f64) / ((h - 1) as f64);
+    let (sat, val) = if ny <= 0.5 {
+        (0.2 + ny * 1.6, 1.0)
+    } else {
+        (1.0, 1.0 - (ny - 0.5) * 1.7)
+    };
+    hsv_to_rgb(hue, sat.clamp(0.0, 1.0), val.clamp(0.05, 1.0))
+}
+
+/// Maps `(r, g, b)` back to nearest `(x, y)` on the `w x h` 2D map.
+pub fn rgb_to_map_coords(r: u8, g: u8, b: u8, w: usize, h: usize) -> (usize, usize) {
+    let w = w.max(2);
+    let h = h.max(2);
+    if r == g && g == b {
+        let ny = 1.0 - (r as f64 / 255.0);
+        let y = (ny * ((h - 1) as f64)).round() as usize;
+        return (w - 1, y.min(h - 1));
+    }
+    let (hue, sat, val) = rgb_to_hsv(r, g, b);
+    let x = ((hue / 360.0) * ((w - 2) as f64)).round() as usize;
+    let ny = if val >= 0.99 && sat < 1.0 {
+        ((sat - 0.2) / 1.6).clamp(0.0, 0.5)
+    } else {
+        (0.5 + (1.0 - val) / 1.7).clamp(0.5, 1.0)
+    };
+    let y = (ny * ((h - 1) as f64)).round() as usize;
+    (x.min(w - 2), y.min(h - 1))
+}
+
+fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (rp, gp, bp) = match h as u32 {
+        0..=59 => (c, x, 0.0),
+        60..=119 => (x, c, 0.0),
+        120..=179 => (0.0, c, x),
+        180..=239 => (0.0, x, c),
+        240..=299 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (
+        ((rp + m) * 255.0).round() as u8,
+        ((gp + m) * 255.0).round() as u8,
+        ((bp + m) * 255.0).round() as u8,
+    )
+}
+
+fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
+    let rf = r as f64 / 255.0;
+    let gf = g as f64 / 255.0;
+    let bf = b as f64 / 255.0;
+    let max = rf.max(gf).max(bf);
+    let min = rf.min(gf).min(bf);
+    let d = max - min;
+    let hue = if d == 0.0 {
+        0.0
+    } else if (max - rf).abs() < f64::EPSILON {
+        60.0 * (((gf - bf) / d).rem_euclid(6.0))
+    } else if (max - gf).abs() < f64::EPSILON {
+        60.0 * (((bf - rf) / d) + 2.0)
+    } else {
+        60.0 * (((rf - gf) / d) + 4.0)
+    };
+    let sat = if max == 0.0 { 0.0 } else { d / max };
+    (hue, sat, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_and_map_coords_sync_cleanly() {
+        assert_eq!(parse_rgb("#222222"), Some((34, 34, 34)));
+        let (x, y) = rgb_to_map_coords(34, 34, 34, 24, 8);
+        assert_eq!(x, 23);
+        assert!(y >= 5);
+        let (r, g, b) = map_coords_to_rgb(x, y, 24, 8);
+        assert_eq!(r, g);
+        assert_eq!(g, b);
+    }
+}
