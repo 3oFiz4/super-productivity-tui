@@ -1,9 +1,9 @@
 use crate::api::SuperProductivityClient;
 use crate::config::{AppConfig, KeybindMode};
 use crate::keybinds::{JkEscapeTracker, JkResult, SequenceState};
-use crate::models::{CreateTaskPayload, Project, Tag, Task};
-use crate::theme::ThemeConfig;
-use chrono::{Duration as ChronoDuration, Local};
+use crate::models::{CreateTaskPayload, Project, SimpleCounter, Tag, Task};
+use crate::theme::{ThemeConfig, format_hex, map_coords_to_rgb, parse_rgb, rgb_to_map_coords};
+use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -34,6 +34,7 @@ pub enum NavItemKind {
     Filter(NavFilter),
     ToggleProjects,
     ToggleTags,
+    Counters,
     History,
     Help,
     Settings,
@@ -59,6 +60,74 @@ pub enum ActiveModal {
     FullNote,
     AddEntity,
     History,
+    Counters,
+    Pomodoro,
+    Reschedule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PomodoroPhase {
+    #[default]
+    Focus,
+    ShortBreak,
+    LongBreak,
+}
+
+impl PomodoroPhase {
+    pub fn duration_secs(self) -> u64 {
+        match self {
+            Self::Focus => 25 * 60,
+            Self::ShortBreak => 5 * 60,
+            Self::LongBreak => 15 * 60,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Focus => "FOCUS",
+            Self::ShortBreak => "SHORT BREAK",
+            Self::LongBreak => "LONG BREAK",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PomodoroState {
+    pub running: bool,
+    pub phase: PomodoroPhase,
+    pub remaining_secs: u64,
+    pub last_tick: Option<Instant>,
+    pub completed_sessions: u32,
+    pub linked_task_id: Option<String>,
+    pub reminder: Option<String>,
+}
+
+impl Default for PomodoroState {
+    fn default() -> Self {
+        Self {
+            running: false,
+            phase: PomodoroPhase::Focus,
+            remaining_secs: PomodoroPhase::Focus.duration_secs(),
+            last_tick: None,
+            completed_sessions: 0,
+            linked_task_id: None,
+            reminder: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RescheduleState {
+    pub task_id: String,
+    pub selected_date: NaiveDate,
+    pub time_input: String,
+    pub focus_time: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CountersState {
+    pub selected: usize,
+    pub adding: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -336,15 +405,46 @@ impl From<&AppConfig> for SettingsState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemePickerFocus {
+    #[default]
+    FieldList,
+    Map2D,
+    Red,
+    Green,
+    Blue,
+    Hex,
+}
+
+impl ThemePickerFocus {
+    pub fn next_in_picker(self) -> Self {
+        match self {
+            Self::FieldList => Self::Map2D,
+            Self::Map2D => Self::Red,
+            Self::Red => Self::Green,
+            Self::Green => Self::Blue,
+            Self::Blue => Self::Hex,
+            Self::Hex => Self::Map2D,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ThemeEditorState {
     pub original: ThemeConfig,
     pub editing: ThemeConfig,
     pub preset_idx: usize,
     pub field_idx: usize,
+    pub picker_focus: ThemePickerFocus,
+    pub rgb: (u8, u8, u8),
+    pub rgb_input: [String; 3],
+    pub map_x: usize,
+    pub map_y: usize,
 }
 
 impl ThemeEditorState {
+    pub const MAP_W: usize = 24;
+    pub const MAP_H: usize = 8;
     pub const FIELD_LABELS: [&'static str; 13] = [
         "Preset / Name",
         "Background (bg)",
@@ -365,11 +465,54 @@ impl ThemeEditorState {
         let mut all = ThemeConfig::builtin_themes();
         all.extend(saved.iter().cloned());
         let preset_idx = all.iter().position(|t| t.name == current.name).unwrap_or(0);
-        Self {
+        let mut st = Self {
             original: current.clone(),
             editing: current.clone(),
             preset_idx,
             field_idx: 0,
+            picker_focus: ThemePickerFocus::FieldList,
+            rgb: (34, 34, 34),
+            rgb_input: ["34".into(), "34".into(), "34".into()],
+            map_x: 0,
+            map_y: 0,
+        };
+        st.sync_picker_from_field();
+        st
+    }
+
+    pub fn sync_picker_from_field(&mut self) {
+        if self.field_idx == 0 {
+            return;
+        }
+        let hex = self.field_value(self.field_idx).to_string();
+        if let Some((r, g, b)) = parse_rgb(&hex) {
+            self.rgb = (r, g, b);
+            self.rgb_input = [r.to_string(), g.to_string(), b.to_string()];
+            let (mx, my) = rgb_to_map_coords(r, g, b, Self::MAP_W, Self::MAP_H);
+            self.map_x = mx;
+            self.map_y = my;
+        }
+    }
+
+    pub fn apply_rgb(&mut self, r: u8, g: u8, b: u8) {
+        self.rgb = (r, g, b);
+        self.rgb_input = [r.to_string(), g.to_string(), b.to_string()];
+        let (mx, my) = rgb_to_map_coords(r, g, b, Self::MAP_W, Self::MAP_H);
+        self.map_x = mx;
+        self.map_y = my;
+        if self.field_idx > 0 {
+            *self.field_value_mut() = format_hex(r, g, b);
+        }
+    }
+
+    pub fn apply_map_coords(&mut self, mx: usize, my: usize) {
+        self.map_x = mx.min(Self::MAP_W - 1);
+        self.map_y = my.min(Self::MAP_H - 1);
+        let (r, g, b) = map_coords_to_rgb(self.map_x, self.map_y, Self::MAP_W, Self::MAP_H);
+        self.rgb = (r, g, b);
+        self.rgb_input = [r.to_string(), g.to_string(), b.to_string()];
+        if self.field_idx > 0 {
+            *self.field_value_mut() = format_hex(r, g, b);
         }
     }
 
@@ -459,10 +602,12 @@ pub enum ApiEvent {
         tasks: Vec<Task>,
         projects: Vec<Project>,
         tags: Vec<Tag>,
+        counters: Option<Vec<SimpleCounter>>,
         current_task_id: Option<String>,
         connected: bool,
         message: String,
     },
+    CounterUpdated(SimpleCounter),
     TaskUpdated(Task),
     TaskCreated(Task, bool, bool),
     TaskDeleted(String),
@@ -501,6 +646,7 @@ pub struct App {
     pub tasks: Vec<Task>,
     pub projects: Vec<Project>,
     pub tags: Vec<Tag>,
+    pub counters: Vec<SimpleCounter>,
     pub connected: bool,
     pub status_message: String,
 
@@ -529,6 +675,9 @@ pub struct App {
     pub add_task_state: AddTaskState,
     pub add_entity_state: AddEntityState,
     pub history_state: HistoryState,
+    pub counters_state: CountersState,
+    pub pomodoro: PomodoroState,
+    pub reschedule_state: Option<RescheduleState>,
     pub theme_editor: Option<ThemeEditorState>,
 
     pub undo_stack: Vec<UndoOp>,
@@ -542,6 +691,7 @@ impl App {
     pub fn new(config: AppConfig, api_tx: mpsc::UnboundedSender<ApiEvent>) -> Self {
         let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
         let settings_state = SettingsState::from(&config);
+        let counters = config.counters.clone();
         Self {
             config,
             client,
@@ -557,6 +707,7 @@ impl App {
             tasks: Vec::new(),
             projects: Vec::new(),
             tags: Vec::new(),
+            counters,
             connected: false,
             status_message: "Connecting...".to_string(),
             show_note: false,
@@ -582,6 +733,9 @@ impl App {
             add_task_state: AddTaskState::default(),
             add_entity_state: AddEntityState::new(AddEntityKind::Project),
             history_state: HistoryState::default(),
+            counters_state: CountersState::default(),
+            pomodoro: PomodoroState::default(),
+            reschedule_state: None,
             theme_editor: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -599,6 +753,7 @@ impl App {
                     let tasks = client.get_tasks().await;
                     let projects = client.get_projects().await.unwrap_or_default();
                     let tags = client.get_tags().await.unwrap_or_default();
+                    let counters = client.get_counters().await.ok();
                     let current = client.get_current_task().await.ok().flatten();
                     let current_task_id = current.map(|t| t.id);
                     match tasks {
@@ -607,6 +762,7 @@ impl App {
                                 tasks,
                                 projects,
                                 tags,
+                                counters,
                                 current_task_id,
                                 connected: true,
                                 message: "Connected to Super Productivity".to_string(),
@@ -617,6 +773,7 @@ impl App {
                                 tasks: Vec::new(),
                                 projects,
                                 tags,
+                                counters,
                                 current_task_id: None,
                                 connected: false,
                                 message: format!("API error: {e}"),
@@ -629,6 +786,7 @@ impl App {
                         tasks: Vec::new(),
                         projects: Vec::new(),
                         tags: Vec::new(),
+                        counters: None,
                         current_task_id: None,
                         connected: false,
                         message: format!("Server {} (ready={})", h.server, h.renderer_ready),
@@ -639,6 +797,7 @@ impl App {
                         tasks: Vec::new(),
                         projects: Vec::new(),
                         tags: Vec::new(),
+                        counters: None,
                         current_task_id: None,
                         connected: false,
                         message: format!("Offline: {e}"),
@@ -654,6 +813,7 @@ impl App {
                 tasks,
                 projects,
                 tags,
+                counters,
                 current_task_id,
                 connected,
                 message,
@@ -661,11 +821,19 @@ impl App {
                 self.tasks = tasks;
                 self.projects = projects;
                 self.tags = tags;
+                if let Some(c) = counters {
+                    self.counters = c;
+                }
                 self.timer_started_at = current_task_id.as_ref().map(|_| Instant::now());
                 self.current_task_id = current_task_id;
                 self.connected = connected;
                 self.status_message = message;
                 self.clamp_selections();
+            }
+            ApiEvent::CounterUpdated(updated) => {
+                if let Some(c) = self.counters.iter_mut().find(|c| c.id == updated.id) {
+                    *c = updated;
+                }
             }
             ApiEvent::CurrentTaskUpdated(cid) => {
                 self.timer_started_at = cid.as_ref().map(|_| Instant::now());
@@ -828,6 +996,13 @@ impl App {
                 icon: "\u{f1da}",
             },
             NavRow {
+                label: "Counters".to_string(),
+                count: Some(self.counters.len()),
+                kind: NavItemKind::Counters,
+                indent: 0,
+                icon: "\u{f080}",
+            },
+            NavRow {
                 label: "Help".to_string(),
                 count: None,
                 kind: NavItemKind::Help,
@@ -954,6 +1129,41 @@ impl App {
             self.typed_key_display.clear();
             self.typed_key_at = None;
         }
+        if self.pomodoro.running
+            && let Some(last) = self.pomodoro.last_tick
+            && last.elapsed() >= Duration::from_secs(1)
+        {
+            self.pomodoro.last_tick = Some(Instant::now());
+            if self.pomodoro.remaining_secs > 0 {
+                self.pomodoro.remaining_secs -= 1;
+            }
+            if self.pomodoro.remaining_secs == 0 {
+                self.pomodoro.running = false;
+                match self.pomodoro.phase {
+                    PomodoroPhase::Focus => {
+                        self.pomodoro.completed_sessions += 1;
+                        let next_phase = if self.pomodoro.completed_sessions.is_multiple_of(4) {
+                            PomodoroPhase::LongBreak
+                        } else {
+                            PomodoroPhase::ShortBreak
+                        };
+                        self.pomodoro.phase = next_phase;
+                        self.pomodoro.remaining_secs = next_phase.duration_secs();
+                        self.pomodoro.reminder = Some(format!(
+                            "Focus complete! Time for a {} ({}m).",
+                            next_phase.label(),
+                            next_phase.duration_secs() / 60
+                        ));
+                    }
+                    PomodoroPhase::ShortBreak | PomodoroPhase::LongBreak => {
+                        self.pomodoro.phase = PomodoroPhase::Focus;
+                        self.pomodoro.remaining_secs = PomodoroPhase::Focus.duration_secs();
+                        self.pomodoro.reminder =
+                            Some("Break finished! Ready for next Focus session.".to_string());
+                    }
+                }
+            }
+        }
     }
 
     fn record_typed_key(&mut self, key: &KeyEvent) {
@@ -1026,6 +1236,18 @@ impl App {
             }
             ActiveModal::History => {
                 self.handle_history_key(key);
+                return;
+            }
+            ActiveModal::Counters => {
+                self.handle_counters_key(key);
+                return;
+            }
+            ActiveModal::Pomodoro => {
+                self.handle_pomodoro_key(key);
+                return;
+            }
+            ActiveModal::Reschedule => {
+                self.handle_reschedule_key(key);
                 return;
             }
             ActiveModal::None => {}
@@ -1137,6 +1359,16 @@ impl App {
                         self.active_modal = ActiveModal::History;
                         return;
                     }
+                    (':', 'n') => {
+                        self.sequence.clear();
+                        self.active_modal = ActiveModal::Counters;
+                        return;
+                    }
+                    (':', 'p') => {
+                        self.sequence.clear();
+                        self.active_modal = ActiveModal::Pomodoro;
+                        return;
+                    }
                     ('g', 'g') => {
                         self.sequence.clear();
                         self.move_to_top();
@@ -1182,6 +1414,17 @@ impl App {
                 'H' => {
                     self.history_state.scroll = 0;
                     self.active_modal = ActiveModal::History;
+                }
+                'C' => {
+                    self.active_modal = ActiveModal::Counters;
+                }
+                'P' => {
+                    self.active_modal = ActiveModal::Pomodoro;
+                }
+                'R' => {
+                    if let Some(t) = self.selected_task().cloned() {
+                        self.open_reschedule(&t.id);
+                    }
                 }
                 'G' => self.move_to_bottom(),
                 'j' if mode.is_nvim_active() => self.move_down(),
@@ -1397,6 +1640,9 @@ impl App {
                         NavItemKind::History => {
                             self.history_state.scroll = 0;
                             self.active_modal = ActiveModal::History;
+                        }
+                        NavItemKind::Counters => {
+                            self.active_modal = ActiveModal::Counters;
                         }
                         NavItemKind::Help => {
                             self.help_search.clear();
@@ -1916,8 +2162,7 @@ impl App {
                         self.active_modal = ActiveModal::None;
                     }
                     'R' => {
-                        self.status_message = "Reschedule: not implemented yet".to_string();
-                        self.active_modal = ActiveModal::None;
+                        self.open_reschedule(&tid);
                     }
                     'd' => {
                         if let Some(orig) = self.tasks.iter().find(|t| t.id == tid).cloned() {
@@ -2462,6 +2707,111 @@ impl App {
             return;
         }
 
+        if ed.picker_focus != ThemePickerFocus::FieldList {
+            match key.code {
+                KeyCode::Esc => {
+                    ed.picker_focus = ThemePickerFocus::FieldList;
+                }
+                KeyCode::Tab => {
+                    ed.picker_focus = ed.picker_focus.next_in_picker();
+                }
+                KeyCode::Enter => {
+                    self.config.theme = ed.editing.clone();
+                    let _ = self.config.save();
+                    self.theme_editor = None;
+                    self.active_modal = ActiveModal::None;
+                    self.status_message = "Theme applied".to_string();
+                }
+                _ => match ed.picker_focus {
+                    ThemePickerFocus::Map2D => {
+                        match key.code {
+                            KeyCode::Left | KeyCode::Char('h') => {
+                                ed.apply_map_coords(ed.map_x.saturating_sub(1), ed.map_y);
+                            }
+                            KeyCode::Right | KeyCode::Char('l') => {
+                                ed.apply_map_coords(ed.map_x + 1, ed.map_y);
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                ed.apply_map_coords(ed.map_x, ed.map_y.saturating_sub(1));
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                ed.apply_map_coords(ed.map_x, ed.map_y + 1);
+                            }
+                            _ => {}
+                        }
+                        self.config.theme = ed.editing.clone();
+                    }
+                    ThemePickerFocus::Red | ThemePickerFocus::Green | ThemePickerFocus::Blue => {
+                        let ch_idx = match ed.picker_focus {
+                            ThemePickerFocus::Red => 0,
+                            ThemePickerFocus::Green => 1,
+                            _ => 2,
+                        };
+                        let mut vals = [ed.rgb.0, ed.rgb.1, ed.rgb.2];
+                        match key.code {
+                            KeyCode::Left | KeyCode::Char('h') => {
+                                vals[ch_idx] = vals[ch_idx].saturating_sub(5);
+                                ed.apply_rgb(vals[0], vals[1], vals[2]);
+                            }
+                            KeyCode::Right | KeyCode::Char('l') => {
+                                vals[ch_idx] = vals[ch_idx].saturating_add(5);
+                                ed.apply_rgb(vals[0], vals[1], vals[2]);
+                            }
+                            KeyCode::Backspace => {
+                                ed.rgb_input[ch_idx].pop();
+                                if let Ok(v) = ed.rgb_input[ch_idx].parse::<u8>() {
+                                    vals[ch_idx] = v;
+                                    ed.rgb = (vals[0], vals[1], vals[2]);
+                                    let (mx, my) = rgb_to_map_coords(
+                                        vals[0],
+                                        vals[1],
+                                        vals[2],
+                                        ThemeEditorState::MAP_W,
+                                        ThemeEditorState::MAP_H,
+                                    );
+                                    ed.map_x = mx;
+                                    ed.map_y = my;
+                                    *ed.field_value_mut() = format_hex(vals[0], vals[1], vals[2]);
+                                }
+                            }
+                            KeyCode::Char(c) if c.is_ascii_digit() => {
+                                if ed.rgb_input[ch_idx].len() < 3 {
+                                    ed.rgb_input[ch_idx].push(c);
+                                } else {
+                                    ed.rgb_input[ch_idx] = c.to_string();
+                                }
+                                if let Ok(v) = ed.rgb_input[ch_idx].parse::<u8>() {
+                                    vals[ch_idx] = v;
+                                    ed.apply_rgb(vals[0], vals[1], vals[2]);
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.config.theme = ed.editing.clone();
+                    }
+                    ThemePickerFocus::Hex => {
+                        match key.code {
+                            KeyCode::Backspace => {
+                                ed.field_value_mut().pop();
+                                ed.sync_picker_from_field();
+                            }
+                            KeyCode::Char(c)
+                                if (c.is_ascii_hexdigit() || c == '#')
+                                    && ed.field_value(ed.field_idx).len() < 7 =>
+                            {
+                                ed.field_value_mut().push(c);
+                                ed.sync_picker_from_field();
+                            }
+                            _ => {}
+                        }
+                        self.config.theme = ed.editing.clone();
+                    }
+                    ThemePickerFocus::FieldList => {}
+                },
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Esc => {
                 self.config.theme = ed.original.clone();
@@ -2470,6 +2820,7 @@ impl App {
             }
             KeyCode::Tab | KeyCode::Down => {
                 ed.field_idx = (ed.field_idx + 1) % ThemeEditorState::FIELD_LABELS.len();
+                ed.sync_picker_from_field();
             }
             KeyCode::BackTab | KeyCode::Up => {
                 ed.field_idx = if ed.field_idx == 0 {
@@ -2477,6 +2828,7 @@ impl App {
                 } else {
                     ed.field_idx - 1
                 };
+                ed.sync_picker_from_field();
             }
             KeyCode::Left if ed.field_idx == 0 => {
                 let mut all = ThemeConfig::builtin_themes();
@@ -2500,6 +2852,10 @@ impl App {
                     self.config.theme = ed.editing.clone();
                 }
             }
+            KeyCode::Right | KeyCode::Char('p') if ed.field_idx > 0 => {
+                ed.sync_picker_from_field();
+                ed.picker_focus = ThemePickerFocus::Map2D;
+            }
             KeyCode::Enter => {
                 self.config.theme = ed.editing.clone();
                 let _ = self.config.save();
@@ -2509,10 +2865,12 @@ impl App {
             }
             KeyCode::Backspace => {
                 ed.field_value_mut().pop();
+                ed.sync_picker_from_field();
                 self.config.theme = ed.editing.clone();
             }
             KeyCode::Char(c) => {
                 ed.field_value_mut().push(c);
+                ed.sync_picker_from_field();
                 self.config.theme = ed.editing.clone();
             }
             _ => {}
@@ -2674,6 +3032,254 @@ impl App {
             }
             KeyCode::Char('g') => {
                 self.history_state.scroll = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn open_reschedule(&mut self, task_id: &str) {
+        let existing_date = self
+            .tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .and_then(|t| t.due_day.as_deref())
+            .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+            .unwrap_or_else(|| Local::now().date_naive());
+        self.reschedule_state = Some(RescheduleState {
+            task_id: task_id.to_string(),
+            selected_date: existing_date,
+            time_input: String::new(),
+            focus_time: false,
+        });
+        self.active_modal = ActiveModal::Reschedule;
+    }
+
+    fn handle_counters_key(&mut self, key: KeyEvent) {
+        if let Some(ref mut title) = self.counters_state.adding {
+            match key.code {
+                KeyCode::Esc => {
+                    self.counters_state.adding = None;
+                }
+                KeyCode::Enter => {
+                    let clean = title.trim().to_string();
+                    self.counters_state.adding = None;
+                    if !clean.is_empty() {
+                        self.counters.push(SimpleCounter {
+                            id: format!("local-cnt-{}", Local::now().timestamp_millis()),
+                            title: clean,
+                            count: 0,
+                            is_on: false,
+                        });
+                        self.config.counters = self.counters.clone();
+                        let _ = self.config.save();
+                    }
+                }
+                KeyCode::Backspace => {
+                    title.pop();
+                }
+                KeyCode::Char(c) => {
+                    title.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('C') => {
+                self.active_modal = ActiveModal::None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.counters_state.selected > 0 {
+                    self.counters_state.selected -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.counters_state.selected + 1 < self.counters.len() {
+                    self.counters_state.selected += 1;
+                }
+            }
+            KeyCode::Char('a') => {
+                self.counters_state.adding = Some(String::new());
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right | KeyCode::Char('l') => {
+                self.adjust_selected_counter(1);
+            }
+            KeyCode::Char('-') | KeyCode::Left | KeyCode::Char('h') => {
+                self.adjust_selected_counter(-1);
+            }
+            KeyCode::Char('r') => {
+                if let Some(c) = self.counters.get_mut(self.counters_state.selected) {
+                    c.count = 0;
+                    let id = c.id.clone();
+                    self.config.counters = self.counters.clone();
+                    let _ = self.config.save();
+                    let client = self.client.clone();
+                    let tx = self.api_tx.clone();
+                    tokio::spawn(async move {
+                        if let Ok(updated) = client.update_counter(&id, 0).await {
+                            let _ = tx.send(ApiEvent::CounterUpdated(updated));
+                        }
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn adjust_selected_counter(&mut self, delta: i64) {
+        if let Some(c) = self.counters.get_mut(self.counters_state.selected) {
+            c.count = (c.count + delta).max(0);
+            let id = c.id.clone();
+            let count = c.count;
+            self.config.counters = self.counters.clone();
+            let _ = self.config.save();
+            let client = self.client.clone();
+            let tx = self.api_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(updated) = client.update_counter(&id, count).await {
+                    let _ = tx.send(ApiEvent::CounterUpdated(updated));
+                }
+            });
+        }
+    }
+
+    fn handle_pomodoro_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => {
+                self.active_modal = ActiveModal::None;
+            }
+            KeyCode::Char(' ') => {
+                self.pomodoro.reminder = None;
+                self.pomodoro.running = !self.pomodoro.running;
+                if self.pomodoro.running {
+                    self.pomodoro.last_tick = Some(Instant::now());
+                    if self.pomodoro.linked_task_id.is_none()
+                        && let Some(t) = self.selected_task()
+                    {
+                        self.pomodoro.linked_task_id = Some(t.id.clone());
+                    }
+                    if self.pomodoro.phase == PomodoroPhase::Focus
+                        && let Some(tid) = self.pomodoro.linked_task_id.clone()
+                    {
+                        self.current_task_id = Some(tid.clone());
+                        self.timer_started_at = Some(Instant::now());
+                        let client = self.client.clone();
+                        tokio::spawn(async move {
+                            let _ = client.set_current_task(Some(&tid)).await;
+                        });
+                    }
+                } else {
+                    self.pomodoro.last_tick = None;
+                }
+            }
+            KeyCode::Char('r') => {
+                self.pomodoro.running = false;
+                self.pomodoro.last_tick = None;
+                self.pomodoro.reminder = None;
+                self.pomodoro.remaining_secs = self.pomodoro.phase.duration_secs();
+            }
+            KeyCode::Char('n') => {
+                self.pomodoro.running = false;
+                self.pomodoro.last_tick = None;
+                self.pomodoro.reminder = None;
+                self.pomodoro.phase = match self.pomodoro.phase {
+                    PomodoroPhase::Focus => PomodoroPhase::ShortBreak,
+                    PomodoroPhase::ShortBreak => PomodoroPhase::LongBreak,
+                    PomodoroPhase::LongBreak => PomodoroPhase::Focus,
+                };
+                self.pomodoro.remaining_secs = self.pomodoro.phase.duration_secs();
+            }
+            KeyCode::Char('l') => {
+                if let Some(t) = self.selected_task() {
+                    self.pomodoro.linked_task_id = Some(t.id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_reschedule_key(&mut self, key: KeyEvent) {
+        let Some(ref mut rs) = self.reschedule_state else {
+            self.active_modal = ActiveModal::None;
+            return;
+        };
+
+        if key.code == KeyCode::Esc {
+            self.reschedule_state = None;
+            self.active_modal = ActiveModal::None;
+            return;
+        }
+
+        if key.code == KeyCode::Tab {
+            rs.focus_time = !rs.focus_time;
+            return;
+        }
+
+        if key.code == KeyCode::Enter {
+            let tid = rs.task_id.clone();
+            let date_str = rs.selected_date.format("%Y-%m-%d").to_string();
+            let time_str = rs.time_input.trim().to_string();
+            let remind_at = if !time_str.is_empty()
+                && let Ok(t) = chrono::NaiveTime::parse_from_str(&time_str, "%H:%M")
+            {
+                let dt = rs.selected_date.and_time(t);
+                dt.and_local_timezone(Local)
+                    .single()
+                    .map(|ldt| ldt.timestamp_millis())
+            } else {
+                None
+            };
+            self.reschedule_state = None;
+            self.active_modal = ActiveModal::None;
+            if let Some(t) = self.tasks.iter_mut().find(|t| t.id == tid) {
+                let prev_due = t.due_day.clone();
+                t.due_day = Some(date_str.clone());
+                self.push_undo(UndoOp::ScheduleTask {
+                    id: tid.clone(),
+                    prev_due,
+                    new_due: Some(date_str.clone()),
+                });
+            }
+            if let Some(ms) = remind_at {
+                self.spawn_patch(tid, json!({ "dueDay": date_str, "remindAt": ms }));
+            } else {
+                self.spawn_patch(tid, json!({ "dueDay": date_str }));
+            }
+            return;
+        }
+
+        if rs.focus_time {
+            match key.code {
+                KeyCode::Backspace => {
+                    rs.time_input.pop();
+                }
+                KeyCode::Char(c) if (c.is_ascii_digit() || c == ':') && rs.time_input.len() < 5 => {
+                    rs.time_input.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') => {
+                rs.selected_date -= ChronoDuration::days(1);
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                rs.selected_date += ChronoDuration::days(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                rs.selected_date -= ChronoDuration::days(7);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                rs.selected_date += ChronoDuration::days(7);
+            }
+            KeyCode::Char('[') => {
+                rs.selected_date -= ChronoDuration::days(30);
+            }
+            KeyCode::Char(']') => {
+                rs.selected_date += ChronoDuration::days(30);
             }
             _ => {}
         }

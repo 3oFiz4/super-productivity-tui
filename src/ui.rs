@@ -1,12 +1,13 @@
 use crate::app::{
     ActiveModal, AddEntityField, AddEntityKind, AddTaskField, App, CompletionKind, FocusSection,
     HistoryTab, HistoryTimeframe, NavFilter, NavItemKind, PropertiesMode, PropertiesTarget,
-    SettingsField, ThemeEditorState,
+    SettingsField, ThemeEditorState, ThemePickerFocus,
 };
 use crate::config::KeybindMode;
 use crate::keybinds::all_keybinds;
 use crate::models::parse_hex_color;
-use chrono::Local;
+use crate::theme::map_coords_to_rgb;
+use chrono::{Datelike, Local, NaiveDate};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -142,6 +143,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ActiveModal::FullNote => render_full_note_modal(frame, app, root),
         ActiveModal::AddEntity => render_add_entity_modal(frame, app, root),
         ActiveModal::History => render_history_modal(frame, app, root),
+        ActiveModal::Counters => render_counters_modal(frame, app, root),
+        ActiveModal::Pomodoro => render_pomodoro_modal(frame, app, root),
+        ActiveModal::Reschedule => render_reschedule_modal(frame, app, root),
     }
 }
 
@@ -565,6 +569,22 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             Style::default()
                 .fg(Color::Black)
                 .bg(app.config.theme.success_color()),
+        ));
+    }
+
+    if app.pomodoro.running || app.pomodoro.reminder.is_some() {
+        let m = app.pomodoro.remaining_secs / 60;
+        let s = app.pomodoro.remaining_secs % 60;
+        spans.push(Span::styled(
+            format!(
+                " \u{f017} {} {:02}:{:02} ",
+                app.pomodoro.phase.label(),
+                m,
+                s
+            ),
+            Style::default()
+                .fg(Color::Black)
+                .bg(app.config.theme.warning_color()),
         ));
     }
 
@@ -1028,11 +1048,11 @@ fn render_theme_modal(frame: &mut Frame, app: &App, area: Rect) {
     let Some(ed) = &app.theme_editor else {
         return;
     };
-    let popup = centered_rect(68, 21, area);
+    let popup = centered_rect(84.min(area.width), 22.min(area.height), area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .title(" Colorscheme / Theme (:c) ")
+        .title(" Colorscheme & Color Picker (:c) ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.config.theme.border_color()))
         .padding(Padding::uniform(1));
@@ -1040,9 +1060,15 @@ fn render_theme_modal(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(inner);
+
     let accent = app.config.theme.accent_color();
     let fg = app.config.theme.fg_color();
     let muted = app.config.theme.muted_color();
+    let warning = app.config.theme.warning_color();
 
     let mut lines = Vec::new();
     for (i, label) in ThemeEditorState::FIELD_LABELS.iter().enumerate() {
@@ -1060,11 +1086,11 @@ fn render_theme_modal(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(" ??", Style::default().fg(muted))
             }
         } else {
-            Span::raw("  (Left/Right preset)")
+            Span::raw("  (◀/▶)")
         };
 
         lines.push(Line::from(vec![
-            Span::styled(format!("{label:<18}: "), Style::default().fg(muted)),
+            Span::styled(format!("{label:<16}: "), Style::default().fg(muted)),
             Span::styled(val, val_style),
             swatch,
         ]));
@@ -1072,11 +1098,153 @@ fn render_theme_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Ctrl+S: save template | Enter: apply | Esc: revert",
+        "p/▶: Picker | Ctrl+S: Save | Enter: Apply | Esc: Revert",
         Style::default().fg(muted),
     )));
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), cols[0]);
+
+    // Right pane: 2D RGB Map + 3 stacked R/G/B inputs + HEX code
+    let picker_block = Block::default()
+        .title(if ed.picker_focus == ThemePickerFocus::FieldList {
+            " Color Picker (press p) "
+        } else {
+            " Color Picker [ACTIVE] "
+        })
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default().fg(if ed.picker_focus == ThemePickerFocus::FieldList {
+                app.config.theme.border_color()
+            } else {
+                accent
+            }),
+        )
+        .padding(Padding::horizontal(1));
+    let p_inner = picker_block.inner(cols[1]);
+    frame.render_widget(picker_block, cols[1]);
+
+    if ed.field_idx == 0 {
+        frame.render_widget(
+            Paragraph::new("Select a color field (rows 2..13) to use the 2D RGB picker.")
+                .style(Style::default().fg(muted))
+                .wrap(Wrap { trim: true }),
+            p_inner,
+        );
+        return;
+    }
+
+    let mut p_lines: Vec<Line<'static>> = Vec::new();
+    for y in 0..ThemeEditorState::MAP_H {
+        let mut row_spans = Vec::new();
+        for x in 0..ThemeEditorState::MAP_W {
+            let (r, g, b) =
+                map_coords_to_rgb(x, y, ThemeEditorState::MAP_W, ThemeEditorState::MAP_H);
+            let is_cursor = x == ed.map_x && y == ed.map_y;
+            if is_cursor {
+                let inv = if (r as u16 + g as u16 + b as u16) > 380 {
+                    Color::Black
+                } else {
+                    Color::White
+                };
+                row_spans.push(Span::styled(
+                    "+",
+                    Style::default()
+                        .fg(inv)
+                        .bg(Color::Rgb(r, g, b))
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                row_spans.push(Span::styled("█", Style::default().fg(Color::Rgb(r, g, b))));
+            }
+        }
+        p_lines.push(Line::from(row_spans));
+    }
+
+    p_lines.push(Line::from(""));
+
+    let channel_line = |label: &str, val: u8, text: &str, focus: ThemePickerFocus, color: Color| {
+        let active = ed.picker_focus == focus;
+        let bars = (val as usize * 12) / 255;
+        let bar_str = format!("{}{}", "█".repeat(bars), "░".repeat(12 - bars));
+        Line::from(vec![
+            Span::styled(
+                format!("{label}: "),
+                Style::default()
+                    .fg(if active { warning } else { muted })
+                    .add_modifier(if active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            Span::styled(bar_str, Style::default().fg(color)),
+            Span::styled(
+                format!(" {text:>3}"),
+                Style::default()
+                    .fg(if active { accent } else { fg })
+                    .add_modifier(if active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+        ])
+    };
+
+    p_lines.push(channel_line(
+        "R",
+        ed.rgb.0,
+        &ed.rgb_input[0],
+        ThemePickerFocus::Red,
+        Color::Red,
+    ));
+    p_lines.push(channel_line(
+        "G",
+        ed.rgb.1,
+        &ed.rgb_input[1],
+        ThemePickerFocus::Green,
+        Color::Green,
+    ));
+    p_lines.push(channel_line(
+        "B",
+        ed.rgb.2,
+        &ed.rgb_input[2],
+        ThemePickerFocus::Blue,
+        Color::Blue,
+    ));
+
+    let hex_active = ed.picker_focus == ThemePickerFocus::Hex;
+    let cur_hex = ed.field_value(ed.field_idx);
+    let preview = parse_hex_color(cur_hex).unwrap_or(Color::Rgb(ed.rgb.0, ed.rgb.1, ed.rgb.2));
+    p_lines.push(Line::from(vec![
+        Span::styled(
+            "HEX: ",
+            Style::default()
+                .fg(if hex_active { warning } else { muted })
+                .add_modifier(if hex_active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
+        Span::styled(
+            cur_hex.to_string(),
+            Style::default()
+                .fg(if hex_active { accent } else { fg })
+                .add_modifier(if hex_active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
+        Span::styled("   ███", Style::default().fg(preview)),
+    ]));
+    p_lines.push(Line::from(Span::styled(
+        "Tab: Map/R/G/B/HEX | hjkl: move | Esc: back",
+        Style::default().fg(muted),
+    )));
+
+    frame.render_widget(Paragraph::new(p_lines), p_inner);
 }
 
 fn render_full_note_modal(frame: &mut Frame, app: &App, area: Rect) {
@@ -1529,6 +1697,242 @@ fn render_history_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn render_counters_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(58, 16, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Counters & Daily Habits (:n / C) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.config.theme.border_color()))
+        .padding(Padding::uniform(1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let fg = app.config.theme.fg_color();
+    let accent = app.config.theme.accent_color();
+    let muted = app.config.theme.muted_color();
+    let success = app.config.theme.success_color();
+
+    let mut lines = Vec::new();
+    if app.counters.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No counters yet. Press 'a' to add one.",
+            Style::default().fg(muted),
+        )));
+    } else {
+        for (i, c) in app.counters.iter().enumerate() {
+            let sel = i == app.counters_state.selected;
+            let row_style = if sel {
+                Style::default()
+                    .fg(accent)
+                    .bg(app.config.theme.selection_bg_color())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(fg)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" \u{f080} {:<26}", c.title), row_style),
+                Span::styled(
+                    format!(" [-]  {}  [+] ", c.count),
+                    Style::default().fg(success).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+    }
+
+    if let Some(title) = &app.counters_state.adding {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("New counter: ", Style::default().fg(muted)),
+            Span::styled(format!("{title}_"), Style::default().fg(success)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "+/- or h/l: adjust | r: reset | a: add | Esc/q: close",
+        Style::default().fg(muted),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_pomodoro_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(58, 15, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Pomodoro / Focus Mode (:p / P) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.config.theme.border_color()))
+        .padding(Padding::uniform(1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let p = &app.pomodoro;
+    let total = p.phase.duration_secs().max(1);
+    let elapsed = total.saturating_sub(p.remaining_secs);
+    let ratio = (elapsed as f64 / total as f64).clamp(0.0, 1.0);
+    let bar_w = (inner.width as usize).saturating_sub(4).min(36);
+    let filled = ((bar_w as f64) * ratio).round() as usize;
+    let bar = format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(bar_w.saturating_sub(filled))
+    );
+
+    let mins = p.remaining_secs / 60;
+    let secs = p.remaining_secs % 60;
+    let linked_title = p
+        .linked_task_id
+        .as_ref()
+        .and_then(|id| app.tasks.iter().find(|t| &t.id == id))
+        .map(|t| t.title.as_str())
+        .unwrap_or("(No task linked — press l to link selected)");
+
+    let accent = app.config.theme.accent_color();
+    let fg = app.config.theme.fg_color();
+    let muted = app.config.theme.muted_color();
+    let success = app.config.theme.success_color();
+    let warning = app.config.theme.warning_color();
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(" {} ", p.phase.label()),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(if p.running { success } else { warning })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "   {:02}:{:02}   (Sessions: {})",
+                    mins, secs, p.completed_sessions
+                ),
+                Style::default().fg(fg).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(bar, Style::default().fg(accent))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Task: ", Style::default().fg(muted)),
+            Span::styled(linked_title, Style::default().fg(fg)),
+        ]),
+    ];
+
+    if let Some(rem) = &p.reminder {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            rem.clone(),
+            Style::default().fg(warning).add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Space: start/pause | r: reset | n: next phase | l: link task | Esc: hide",
+        Style::default().fg(muted),
+    )));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+fn render_reschedule_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(rs) = &app.reschedule_state else {
+        return;
+    };
+    let popup = centered_rect(44, 16, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Reschedule Date Picker (R) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.config.theme.border_color()))
+        .padding(Padding::uniform(1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let fg = app.config.theme.fg_color();
+    let accent = app.config.theme.accent_color();
+    let muted = app.config.theme.muted_color();
+    let warning = app.config.theme.warning_color();
+    let sel_bg = app.config.theme.selection_bg_color();
+
+    let sel = rs.selected_date;
+    let first = NaiveDate::from_ymd_opt(sel.year(), sel.month(), 1).unwrap_or(sel);
+    let offset = first.weekday().num_days_from_monday() as usize;
+    let next_month = if sel.month() == 12 {
+        NaiveDate::from_ymd_opt(sel.year() + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(sel.year(), sel.month() + 1, 1)
+    }
+    .unwrap_or(sel);
+    let days_in_month = (next_month - first).num_days() as u32;
+    let today = Local::now().date_naive();
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("      {} ({})", sel.format("%B %Y"), sel.format("%Y-%m-%d")),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            " Mo  Tu  We  Th  Fr  Sa  Su",
+            Style::default().fg(muted),
+        )),
+    ];
+
+    let mut row_spans: Vec<Span<'static>> = vec![Span::raw(" ".repeat(offset * 4))];
+    for day in 1..=days_in_month {
+        let d = NaiveDate::from_ymd_opt(sel.year(), sel.month(), day).unwrap_or(sel);
+        let style = if d == sel {
+            Style::default()
+                .fg(Color::Black)
+                .bg(accent)
+                .add_modifier(Modifier::BOLD)
+        } else if d == today {
+            Style::default()
+                .fg(warning)
+                .bg(sel_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(fg)
+        };
+        row_spans.push(Span::styled(format!("{day:>2}  "), style));
+        if (offset + day as usize).is_multiple_of(7) {
+            lines.push(Line::from(std::mem::take(&mut row_spans)));
+        }
+    }
+    if !row_spans.is_empty() {
+        lines.push(Line::from(row_spans));
+    }
+
+    lines.push(Line::from(""));
+    let time_style = if rs.focus_time {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(fg)
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Remind at (HH:MM): ", Style::default().fg(muted)),
+        Span::styled(
+            if rs.time_input.is_empty() && !rs.focus_time {
+                "<optional>"
+            } else {
+                &rs.time_input
+            },
+            time_style,
+        ),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "hjkl: day | [/]: month | Tab: time | Enter: save",
+        Style::default().fg(muted),
+    )));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1566,12 +1970,23 @@ mod tests {
             ActiveModal::FullNote,
             ActiveModal::AddEntity,
             ActiveModal::History,
+            ActiveModal::Counters,
+            ActiveModal::Pomodoro,
+            ActiveModal::Reschedule,
         ] {
             if modal == ActiveModal::Theme {
                 app.theme_editor = Some(ThemeEditorState::new(
                     &app.config.theme,
                     &app.config.saved_themes,
                 ));
+            }
+            if modal == ActiveModal::Reschedule {
+                app.reschedule_state = Some(crate::app::RescheduleState {
+                    task_id: "t1".into(),
+                    selected_date: Local::now().date_naive(),
+                    time_input: String::new(),
+                    focus_time: false,
+                });
             }
             app.active_modal = modal;
             terminal.draw(|f| render(f, &mut app)).unwrap();

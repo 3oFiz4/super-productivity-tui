@@ -190,6 +190,24 @@ pub fn all_keybinds() -> Vec<KeybindEntry> {
             is_nvim_highlight: true,
         },
         KeybindEntry {
+            normal: ":n",
+            nvim: "C",
+            description: "Open Counters & Simple Habits",
+            is_nvim_highlight: true,
+        },
+        KeybindEntry {
+            normal: ":p",
+            nvim: "P",
+            description: "Open Pomodoro / Focus Mode",
+            is_nvim_highlight: true,
+        },
+        KeybindEntry {
+            normal: "R",
+            nvim: "R",
+            description: "Reschedule date & time picker",
+            is_nvim_highlight: false,
+        },
+        KeybindEntry {
             normal: "q",
             nvim: "q",
             description: "Quit application",
