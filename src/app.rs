@@ -34,6 +34,7 @@ pub enum NavItemKind {
     Filter(NavFilter),
     ToggleProjects,
     ToggleTags,
+    History,
     Help,
     Settings,
 }
@@ -57,6 +58,66 @@ pub enum ActiveModal {
     Theme,
     FullNote,
     AddEntity,
+    History,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistoryTab {
+    #[default]
+    Completed,
+    Projects,
+    Tags,
+}
+
+impl HistoryTab {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Completed => Self::Projects,
+            Self::Projects => Self::Tags,
+            Self::Tags => Self::Completed,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Completed => Self::Tags,
+            Self::Projects => Self::Completed,
+            Self::Tags => Self::Projects,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistoryTimeframe {
+    #[default]
+    All,
+    Today,
+    Week,
+}
+
+impl HistoryTimeframe {
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Today,
+            Self::Today => Self::Week,
+            Self::Week => Self::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All Time",
+            Self::Today => "Today",
+            Self::Week => "This Week",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HistoryState {
+    pub tab: HistoryTab,
+    pub timeframe: HistoryTimeframe,
+    pub scroll: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,7 +208,10 @@ impl RepeatOption {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompletionKind {
     Tag,
+    Project,
     Time,
+    Due,
+    Deadline,
 }
 
 #[derive(Debug, Clone)]
@@ -464,6 +528,7 @@ pub struct App {
     pub settings_state: SettingsState,
     pub add_task_state: AddTaskState,
     pub add_entity_state: AddEntityState,
+    pub history_state: HistoryState,
     pub theme_editor: Option<ThemeEditorState>,
 
     pub undo_stack: Vec<UndoOp>,
@@ -516,6 +581,7 @@ impl App {
             settings_state,
             add_task_state: AddTaskState::default(),
             add_entity_state: AddEntityState::new(AddEntityKind::Project),
+            history_state: HistoryState::default(),
             theme_editor: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -755,6 +821,13 @@ impl App {
                 icon: "\u{f0c9}",
             },
             NavRow {
+                label: "History".to_string(),
+                count: Some(self.tasks.iter().filter(|t| t.is_done).count()),
+                kind: NavItemKind::History,
+                indent: 0,
+                icon: "\u{f1da}",
+            },
+            NavRow {
                 label: "Help".to_string(),
                 count: None,
                 kind: NavItemKind::Help,
@@ -951,6 +1024,10 @@ impl App {
                 self.handle_add_entity_key(key);
                 return;
             }
+            ActiveModal::History => {
+                self.handle_history_key(key);
+                return;
+            }
             ActiveModal::None => {}
         }
 
@@ -1054,6 +1131,12 @@ impl App {
                         self.active_modal = ActiveModal::Theme;
                         return;
                     }
+                    (':', 'w') => {
+                        self.sequence.clear();
+                        self.history_state.scroll = 0;
+                        self.active_modal = ActiveModal::History;
+                        return;
+                    }
                     ('g', 'g') => {
                         self.sequence.clear();
                         self.move_to_top();
@@ -1096,6 +1179,10 @@ impl App {
 
             match ch {
                 'q' => self.should_quit = true,
+                'H' => {
+                    self.history_state.scroll = 0;
+                    self.active_modal = ActiveModal::History;
+                }
                 'G' => self.move_to_bottom(),
                 'j' if mode.is_nvim_active() => self.move_down(),
                 'k' if mode.is_nvim_active() => self.move_up(),
@@ -1307,6 +1394,10 @@ impl App {
                         NavItemKind::ToggleTags => {
                             self.tags_expanded = !self.tags_expanded;
                         }
+                        NavItemKind::History => {
+                            self.history_state.scroll = 0;
+                            self.active_modal = ActiveModal::History;
+                        }
                         NavItemKind::Help => {
                             self.help_search.clear();
                             self.active_modal = ActiveModal::Help;
@@ -1506,7 +1597,9 @@ impl App {
                     parent_id: task.parent_id.clone(),
                     tag_ids: task.tag_ids.clone(),
                     due_day: task.due_day.clone(),
+                    deadline_day: task.deadline_day.clone(),
                     time_estimate: task.time_estimate,
+                    time_spent: task.time_spent,
                     is_add_to_top: Some(target == 0),
                 };
                 self.spawn_create(payload, target == 0, false);
@@ -1575,7 +1668,9 @@ impl App {
                     parent_id: task.parent_id.clone(),
                     tag_ids: task.tag_ids.clone(),
                     due_day: task.due_day.clone(),
+                    deadline_day: task.deadline_day.clone(),
                     time_estimate: task.time_estimate,
+                    time_spent: task.time_spent,
                     is_add_to_top: Some(*to_top),
                 };
                 self.spawn_create(payload, *to_top, false);
@@ -1833,7 +1928,9 @@ impl App {
                                 parent_id: orig.parent_id,
                                 tag_ids: orig.tag_ids,
                                 due_day: orig.due_day,
+                                deadline_day: orig.deadline_day,
                                 time_estimate: orig.time_estimate,
+                                time_spent: orig.time_spent,
                                 is_add_to_top: Some(false),
                             };
                             self.spawn_create(payload, false, true);
@@ -2055,36 +2152,82 @@ impl App {
                 .filter(|t| p_low.is_empty() || t.title.to_lowercase().contains(&p_low))
                 .map(|t| t.title.clone())
                 .collect();
-            if items.is_empty() {
-                self.add_task_state.completion = None;
-            } else {
-                self.add_task_state.completion = Some(CompletionPopup {
-                    kind: CompletionKind::Tag,
-                    items,
-                    selected: 0,
-                    trigger_start: last_word_start,
-                });
-            }
-        } else if let Some(prefix) = token.strip_prefix('@') {
+            self.set_completion(CompletionKind::Tag, items, last_word_start);
+        } else if let Some(prefix) = token.strip_prefix('+') {
             let p_low = prefix.to_lowercase();
-            let presets = ["today", "tomorrow", "15m", "30m", "1h", "2h"];
+            let items: Vec<String> = self
+                .projects
+                .iter()
+                .filter(|p| p_low.is_empty() || p.title.to_lowercase().contains(&p_low))
+                .map(|p| p.title.clone())
+                .collect();
+            self.set_completion(CompletionKind::Project, items, last_word_start);
+        } else if let Some(prefix) = token.strip_prefix('t')
+            && (prefix.is_empty() || prefix.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        {
+            let p_low = prefix.to_lowercase();
+            let presets = [
+                "15m", "30m", "45m", "1h", "1h30m", "1h5m3s", "2h", "1d", "30m/1h", "1h/2h",
+            ];
             let items: Vec<String> = presets
                 .iter()
                 .filter(|s| p_low.is_empty() || s.starts_with(&p_low))
                 .map(|s| (*s).to_string())
                 .collect();
-            if items.is_empty() {
-                self.add_task_state.completion = None;
-            } else {
-                self.add_task_state.completion = Some(CompletionPopup {
-                    kind: CompletionKind::Time,
-                    items,
-                    selected: 0,
-                    trigger_start: last_word_start,
-                });
-            }
+            self.set_completion(CompletionKind::Time, items, last_word_start);
+        } else if let Some(prefix) = token.strip_prefix('@') {
+            let p_low = prefix.to_lowercase();
+            let presets = [
+                "today",
+                "tomorrow",
+                "monday",
+                "friday",
+                "next_week",
+                "30m",
+                "2h",
+                "1d",
+                "4pm",
+                "19:00",
+            ];
+            let items: Vec<String> = presets
+                .iter()
+                .filter(|s| p_low.is_empty() || s.starts_with(&p_low))
+                .map(|s| (*s).to_string())
+                .collect();
+            self.set_completion(CompletionKind::Due, items, last_word_start);
+        } else if let Some(prefix) = token.strip_prefix('!') {
+            let p_low = prefix.to_lowercase();
+            let presets = [
+                "today",
+                "tomorrow",
+                "friday",
+                "next_week",
+                "next_month",
+                "2d",
+                "1h30m",
+                "14:30",
+            ];
+            let items: Vec<String> = presets
+                .iter()
+                .filter(|s| p_low.is_empty() || s.starts_with(&p_low))
+                .map(|s| (*s).to_string())
+                .collect();
+            self.set_completion(CompletionKind::Deadline, items, last_word_start);
         } else {
             self.add_task_state.completion = None;
+        }
+    }
+
+    fn set_completion(&mut self, kind: CompletionKind, items: Vec<String>, trigger_start: usize) {
+        if items.is_empty() {
+            self.add_task_state.completion = None;
+        } else {
+            self.add_task_state.completion = Some(CompletionPopup {
+                kind,
+                items,
+                selected: 0,
+                trigger_start,
+            });
         }
     }
 
@@ -2104,57 +2247,20 @@ impl App {
                 }
                 '#'
             }
-            CompletionKind::Time => '@',
+            CompletionKind::Project => {
+                if let Some(idx) = self.projects.iter().position(|p| p.title == choice) {
+                    self.add_task_state.project_idx = idx + 1;
+                }
+                '+'
+            }
+            CompletionKind::Time => 't',
+            CompletionKind::Due => '@',
+            CompletionKind::Deadline => '!',
         };
         self.add_task_state.title.truncate(comp.trigger_start);
         self.add_task_state
             .title
             .push_str(&format!("{prefix_char}{choice} "));
-    }
-
-    fn parse_inline_tokens(
-        &self,
-        raw_title: &str,
-    ) -> (String, Vec<String>, Option<String>, Option<u64>) {
-        let mut clean_words = Vec::new();
-        let mut tag_ids = self.add_task_state.selected_tag_ids.clone();
-        let mut due_day = None;
-        let mut time_estimate = None;
-
-        for word in raw_title.split_whitespace() {
-            if let Some(tag_name) = word.strip_prefix('#') {
-                if let Some(tag) = self
-                    .tags
-                    .iter()
-                    .find(|t| t.title.eq_ignore_ascii_case(tag_name))
-                {
-                    if !tag_ids.contains(&tag.id) {
-                        tag_ids.push(tag.id.clone());
-                    }
-                } else {
-                    clean_words.push(word);
-                }
-            } else if let Some(time_tok) = word.strip_prefix('@') {
-                match time_tok.to_lowercase().as_str() {
-                    "today" => due_day = Some(Local::now().format("%Y-%m-%d").to_string()),
-                    "tomorrow" => {
-                        due_day = Some(
-                            (Local::now() + ChronoDuration::days(1))
-                                .format("%Y-%m-%d")
-                                .to_string(),
-                        )
-                    }
-                    "15m" => time_estimate = Some(15 * 60_000),
-                    "30m" => time_estimate = Some(30 * 60_000),
-                    "1h" => time_estimate = Some(60 * 60_000),
-                    "2h" => time_estimate = Some(120 * 60_000),
-                    _ => clean_words.push(word),
-                }
-            } else {
-                clean_words.push(word);
-            }
-        }
-        (clean_words.join(" "), tag_ids, due_day, time_estimate)
     }
 
     fn handle_add_task_key(&mut self, key: KeyEvent) {
@@ -2199,8 +2305,21 @@ impl App {
                 if raw_title.is_empty() {
                     return;
                 }
-                let (title, tag_ids, due_day, time_estimate) = self.parse_inline_tokens(&raw_title);
-                if title.is_empty() {
+                let initial_project_id = if self.add_task_state.project_idx == 0 {
+                    None
+                } else {
+                    self.projects
+                        .get(self.add_task_state.project_idx - 1)
+                        .map(|p| p.id.clone())
+                };
+                let parsed = crate::short_syntax::parse_short_syntax(
+                    &raw_title,
+                    &self.projects,
+                    &self.tags,
+                    initial_project_id,
+                    self.add_task_state.selected_tag_ids.clone(),
+                );
+                if parsed.title.is_empty() {
                     return;
                 }
                 let mut notes = self.add_task_state.note.trim().to_string();
@@ -2212,22 +2331,17 @@ impl App {
                         notes = format!("{notes}\n{rep_note}");
                     }
                 }
-                let project_id = if self.add_task_state.project_idx == 0 {
-                    None
-                } else {
-                    self.projects
-                        .get(self.add_task_state.project_idx - 1)
-                        .map(|p| p.id.clone())
-                };
                 let to_top = self.add_task_state.add_to_top;
                 let payload = CreateTaskPayload {
-                    title: title.clone(),
+                    title: parsed.title,
                     notes: if notes.is_empty() { None } else { Some(notes) },
-                    project_id,
+                    project_id: parsed.project_id,
                     parent_id: self.add_task_state.parent_id.clone(),
-                    tag_ids,
-                    due_day,
-                    time_estimate,
+                    tag_ids: parsed.tag_ids,
+                    due_day: parsed.due_day,
+                    deadline_day: parsed.deadline_day,
+                    time_estimate: parsed.time_estimate,
+                    time_spent: parsed.time_spent,
                     is_add_to_top: Some(to_top),
                 };
                 self.active_modal = ActiveModal::None;
@@ -2522,6 +2636,48 @@ impl App {
             _ => {}
         }
     }
+
+    fn handle_history_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('H') => {
+                self.active_modal = ActiveModal::None;
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                self.history_state.tab = self.history_state.tab.next();
+                self.history_state.scroll = 0;
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                self.history_state.tab = self.history_state.tab.prev();
+                self.history_state.scroll = 0;
+            }
+            KeyCode::Char('1') => {
+                self.history_state.tab = HistoryTab::Completed;
+                self.history_state.scroll = 0;
+            }
+            KeyCode::Char('2') => {
+                self.history_state.tab = HistoryTab::Projects;
+                self.history_state.scroll = 0;
+            }
+            KeyCode::Char('3') => {
+                self.history_state.tab = HistoryTab::Tags;
+                self.history_state.scroll = 0;
+            }
+            KeyCode::Char('f') | KeyCode::Char(' ') => {
+                self.history_state.timeframe = self.history_state.timeframe.next();
+                self.history_state.scroll = 0;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.history_state.scroll = self.history_state.scroll.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.history_state.scroll = self.history_state.scroll.saturating_sub(1);
+            }
+            KeyCode::Char('g') => {
+                self.history_state.scroll = 0;
+            }
+            _ => {}
+        }
+    }
 }
 
 pub fn fuzzy_match(haystack: &str, needle: &str) -> bool {
@@ -2575,6 +2731,8 @@ mod tests {
             parent_id: None,
             tag_ids: vec![],
             due_day: None,
+            deadline_day: None,
+            done_on: None,
             time_estimate: None,
             time_spent: None,
             repeat_cfg_id: None,

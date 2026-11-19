@@ -184,6 +184,12 @@ pub fn all_keybinds() -> Vec<KeybindEntry> {
             is_nvim_highlight: false,
         },
         KeybindEntry {
+            normal: ":w",
+            nvim: "H",
+            description: "Open Worklog / History view",
+            is_nvim_highlight: true,
+        },
+        KeybindEntry {
             normal: "q",
             nvim: "q",
             description: "Quit application",

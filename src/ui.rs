@@ -1,6 +1,7 @@
 use crate::app::{
     ActiveModal, AddEntityField, AddEntityKind, AddTaskField, App, CompletionKind, FocusSection,
-    NavFilter, NavItemKind, PropertiesMode, PropertiesTarget, SettingsField, ThemeEditorState,
+    HistoryTab, HistoryTimeframe, NavFilter, NavItemKind, PropertiesMode, PropertiesTarget,
+    SettingsField, ThemeEditorState,
 };
 use crate::config::KeybindMode;
 use crate::keybinds::all_keybinds;
@@ -140,6 +141,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ActiveModal::Theme => render_theme_modal(frame, app, root),
         ActiveModal::FullNote => render_full_note_modal(frame, app, root),
         ActiveModal::AddEntity => render_add_entity_modal(frame, app, root),
+        ActiveModal::History => render_history_modal(frame, app, root),
     }
 }
 
@@ -425,6 +427,19 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
             meta_parts.push(Span::styled(
                 format!(" \u{f073} {due} "),
                 Style::default().fg(due_color),
+            ));
+        }
+        if let Some(dl) = &task.deadline_day {
+            let dl_color = if dl.as_str() < today_str.as_str() {
+                app.config.theme.danger_color()
+            } else if dl.as_str() == today_str.as_str() {
+                app.config.theme.warning_color()
+            } else {
+                app.config.theme.accent_color()
+            };
+            meta_parts.push(Span::styled(
+                format!(" \u{f06a} {dl} "),
+                Style::default().fg(dl_color),
             ));
         }
         if task.repeat_cfg_id.is_some() {
@@ -871,7 +886,7 @@ fn render_add_task_modal(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("Title:    ", Style::default().fg(muted)),
             Span::styled(
                 if st.title.is_empty() && st.active_field != AddTaskField::Title {
-                    "<type title, #tag, @time>"
+                    "<+proj #tag t1h5m3s @due !deadline>"
                 } else {
                     &st.title
                 },
@@ -977,7 +992,10 @@ fn render_add_task_modal(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(Clear, comp_rect);
         let comp_title = match comp.kind {
             CompletionKind::Tag => " Tags (#) ",
-            CompletionKind::Time => " Time (@) ",
+            CompletionKind::Project => " Projects (+) ",
+            CompletionKind::Time => " Time (t) ",
+            CompletionKind::Due => " Due (@) ",
+            CompletionKind::Deadline => " Deadline (!) ",
         };
         let comp_block = Block::default()
             .title(comp_title)
@@ -1291,6 +1309,226 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, w, h)
 }
 
+fn render_history_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(
+        area.width.saturating_sub(8).max(52),
+        area.height.saturating_sub(4).max(16),
+        area,
+    );
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Worklog / History (:w / H) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.config.theme.border_color()))
+        .padding(Padding::uniform(1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let today = Local::now().date_naive();
+    let today_str = today.format("%Y-%m-%d").to_string();
+    let week_ago_str = (today - chrono::Duration::days(7))
+        .format("%Y-%m-%d")
+        .to_string();
+
+    let matches_timeframe = |t: &crate::models::Task| -> bool {
+        match app.history_state.timeframe {
+            HistoryTimeframe::All => true,
+            HistoryTimeframe::Today => t.due_day.as_deref() == Some(today_str.as_str()),
+            HistoryTimeframe::Week => t
+                .due_day
+                .as_deref()
+                .is_some_and(|d| d >= week_ago_str.as_str() && d <= today_str.as_str()),
+        }
+    };
+
+    let filtered: Vec<&crate::models::Task> =
+        app.tasks.iter().filter(|t| matches_timeframe(t)).collect();
+    let done_count = filtered.iter().filter(|t| t.is_done).count();
+    let total_count = filtered.len();
+    let total_spent: u64 = filtered.iter().filter_map(|t| t.time_spent).sum();
+    let total_est: u64 = filtered.iter().filter_map(|t| t.time_estimate).sum();
+
+    let accent = app.config.theme.accent_color();
+    let fg = app.config.theme.fg_color();
+    let muted = app.config.theme.muted_color();
+    let success = app.config.theme.success_color();
+    let warning = app.config.theme.warning_color();
+
+    let tab_style = |t: HistoryTab| {
+        if app.history_state.tab == t {
+            Style::default()
+                .fg(Color::Black)
+                .bg(accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(fg)
+        }
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" [1] Completed ", tab_style(HistoryTab::Completed)),
+            Span::raw(" "),
+            Span::styled(" [2] Projects ", tab_style(HistoryTab::Projects)),
+            Span::raw(" "),
+            Span::styled(" [3] Tags ", tab_style(HistoryTab::Tags)),
+            Span::styled(
+                format!("   Range (f): {}", app.history_state.timeframe.label()),
+                Style::default().fg(warning).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!(
+                "Summary: {done_count}/{total_count} done | Spent: {} | Estimate: {}",
+                format_ms(total_spent),
+                format_ms(total_est)
+            ),
+            Style::default().fg(success),
+        )),
+        Line::from(Span::styled(
+            "─".repeat(inner.width as usize),
+            Style::default().fg(app.config.theme.border_color()),
+        )),
+    ];
+
+    let mut body_lines: Vec<Line<'static>> = Vec::new();
+    match app.history_state.tab {
+        HistoryTab::Completed => {
+            let done_tasks: Vec<_> = filtered.iter().filter(|t| t.is_done).collect();
+            if done_tasks.is_empty() {
+                body_lines.push(Line::from(Span::styled(
+                    "No completed tasks in this timeframe.",
+                    Style::default().fg(muted),
+                )));
+            } else {
+                for t in done_tasks {
+                    let spent = t.time_spent.unwrap_or(0);
+                    let est = t.time_estimate.unwrap_or(0);
+                    let proj = t
+                        .project_id
+                        .as_ref()
+                        .and_then(|pid| app.projects.iter().find(|p| &p.id == pid))
+                        .map(|p| format!(" \u{f07b} {}", p.title))
+                        .unwrap_or_default();
+                    let due = t
+                        .due_day
+                        .as_deref()
+                        .map(|d| format!(" ({d})"))
+                        .unwrap_or_default();
+                    body_lines.push(Line::from(vec![
+                        Span::styled(" \u{f046} ", Style::default().fg(success)),
+                        Span::styled(t.title.clone(), Style::default().fg(fg)),
+                        Span::styled(
+                            format!("  [{}/{}]{due}{proj}", format_ms(spent), format_ms(est)),
+                            Style::default().fg(muted),
+                        ),
+                    ]));
+                }
+            }
+        }
+        HistoryTab::Projects => {
+            let inbox_tasks: Vec<_> = filtered.iter().filter(|t| t.project_id.is_none()).collect();
+            let i_done = inbox_tasks.iter().filter(|t| t.is_done).count();
+            let i_spent: u64 = inbox_tasks.iter().filter_map(|t| t.time_spent).sum();
+            let i_est: u64 = inbox_tasks.iter().filter_map(|t| t.time_estimate).sum();
+            body_lines.push(Line::from(vec![
+                Span::styled(
+                    " \u{f01c} Inbox",
+                    Style::default().fg(fg).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "  — {i_done}/{} done | Spent: {} / Est: {}",
+                        inbox_tasks.len(),
+                        format_ms(i_spent),
+                        format_ms(i_est)
+                    ),
+                    Style::default().fg(muted),
+                ),
+            ]));
+
+            for p in &app.projects {
+                let p_tasks: Vec<_> = filtered
+                    .iter()
+                    .filter(|t| t.project_id.as_deref() == Some(p.id.as_str()))
+                    .collect();
+                let p_done = p_tasks.iter().filter(|t| t.is_done).count();
+                let p_spent: u64 = p_tasks.iter().filter_map(|t| t.time_spent).sum();
+                let p_est: u64 = p_tasks.iter().filter_map(|t| t.time_estimate).sum();
+                body_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" \u{f07b} {}", p.title),
+                        Style::default()
+                            .fg(p.display_color())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(
+                            "  — {p_done}/{} done | Spent: {} / Est: {}",
+                            p_tasks.len(),
+                            format_ms(p_spent),
+                            format_ms(p_est)
+                        ),
+                        Style::default().fg(muted),
+                    ),
+                ]));
+            }
+        }
+        HistoryTab::Tags => {
+            if app.tags.is_empty() {
+                body_lines.push(Line::from(Span::styled(
+                    "No tags found.",
+                    Style::default().fg(muted),
+                )));
+            } else {
+                for tag in &app.tags {
+                    let t_tasks: Vec<_> = filtered
+                        .iter()
+                        .filter(|t| t.tag_ids.iter().any(|id| id == &tag.id))
+                        .collect();
+                    let t_done = t_tasks.iter().filter(|t| t.is_done).count();
+                    let t_spent: u64 = t_tasks.iter().filter_map(|t| t.time_spent).sum();
+                    let t_est: u64 = t_tasks.iter().filter_map(|t| t.time_estimate).sum();
+                    body_lines.push(Line::from(vec![
+                        Span::styled(
+                            format!(" \u{f292} {}", tag.title),
+                            Style::default()
+                                .fg(tag.display_color())
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(
+                                "  — {t_done}/{} done | Spent: {} / Est: {}",
+                                t_tasks.len(),
+                                format_ms(t_spent),
+                                format_ms(t_est)
+                            ),
+                            Style::default().fg(muted),
+                        ),
+                    ]));
+                }
+            }
+        }
+    }
+
+    let max_body = inner.height.saturating_sub(5) as usize;
+    let skip = app
+        .history_state
+        .scroll
+        .min(body_lines.len().saturating_sub(1));
+    for line in body_lines.into_iter().skip(skip).take(max_body.max(1)) {
+        lines.push(line);
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "1/2/3 or Tab: switch view | f/Space: timeframe | j/k: scroll | Esc/q: close",
+        Style::default().fg(muted),
+    )));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1327,6 +1565,7 @@ mod tests {
             ActiveModal::Theme,
             ActiveModal::FullNote,
             ActiveModal::AddEntity,
+            ActiveModal::History,
         ] {
             if modal == ActiveModal::Theme {
                 app.theme_editor = Some(ThemeEditorState::new(
