@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod bridge;
+mod cli;
 mod config;
 mod keybinds;
 mod models;
@@ -27,6 +28,11 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    if !cli_args.is_empty() {
+        return cli::run(cli_args).await;
+    }
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;

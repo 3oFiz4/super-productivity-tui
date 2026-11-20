@@ -208,6 +208,28 @@ When typing a task **Title**, you can embed inline tokens (with floating autocom
 
 ---
 
+## CLI Subcommands
+
+Run `spt <command>` for non-interactive scripting, cron jobs, and status bars (all commands support `--json` and fall back to the offline cache/queue when SP is closed):
+
+```bash
+spt add "Ship release +Work #urgent t30m/1h @today !friday"
+spt ls today --project Work
+spt done "Ship release"
+spt schedule "Ship release" tomorrow --remind 09:30
+spt start "Ship release" && spt stop
+spt log "Ship release" 25m
+spt status --waybar        # JSON for Waybar / Polybar
+spt status --tmux          # Compact line for tmux / prompt
+spt counter inc Water
+spt summary && spt worklog --week --by project
+spt sync && spt doctor
+```
+
+Run `spt --help` for the full list of subcommands and flags.
+
+---
+
 ## License
 
 MIT
