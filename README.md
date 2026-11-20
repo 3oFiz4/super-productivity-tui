@@ -1,5 +1,22 @@
 # Super Productivity TUI
 
+https://github.com/user-attachments/assets/220b082d-f626-4e31-a14c-3818a0de2199
+
+<details>
+  <summary>Thumbnails (PNG)</summary>
+  <img width="784" height="698" alt="image" src="https://github.com/user-attachments/assets/f679b4a8-16d2-4230-a913-c360776fee22" />
+  <img width="784" height="698" alt="image" src="https://github.com/user-attachments/assets/699e8888-96a5-48b3-94b7-ecf01de84536" />
+  <img width="784" height="698" alt="image" src="https://github.com/user-attachments/assets/766e0f35-06c3-4cb3-9047-fdc292a3651d" />
+  <img width="784" height="698" alt="image" src="https://github.com/user-attachments/assets/c01812e8-16cf-4207-90be-2228e47351cc" />
+  <img width="784" height="698" alt="image" src="https://github.com/user-attachments/assets/cb474b4e-abc5-4ae1-b922-95fa9d135785" />
+  <img width="784" height="698" alt="image" src="https://github.com/user-attachments/assets/547ce18b-5a0b-462e-ab99-c45e0586744f" />
+  <img width="784" height="698" alt="image" src="https://github.com/user-attachments/assets/79f1317e-d207-429e-b631-98551b61dff2" />
+
+</details>
+
+
+
+
 A blazing fast vim-supported terminal client for **Super Productivity (SP)**, made in Rust (ratatui) and connected to Super Productivity's Local REST API.
 
 Freely manage your tasks, subtasks, projects, tags, deadlines, focus sessions, daily habits, worklogs, and terminal colorschemes without having to open super-productivity EVER... i mean it.
