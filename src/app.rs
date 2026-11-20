@@ -690,7 +690,7 @@ pub enum UndoOp {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenameTarget {
     Task(String),
     Project(String),
@@ -781,6 +781,7 @@ pub struct App {
     pub selected_task_ids: HashSet<String>,
     pub rename_target: Option<RenameTarget>,
     pub rename_buffer: String,
+    pub rename_completion: Option<CompletionPopup>,
     pub jk_tracker: JkEscapeTracker,
     pub prop_jk_tracker: JkEscapeTracker,
     pub sequence: SequenceState,
@@ -883,6 +884,7 @@ impl App {
             selected_task_ids: HashSet::new(),
             rename_target: None,
             rename_buffer: String::new(),
+            rename_completion: None,
             jk_tracker: JkEscapeTracker::default(),
             prop_jk_tracker: JkEscapeTracker::default(),
             sequence: SequenceState::default(),
@@ -1569,6 +1571,7 @@ impl App {
     pub fn tick(&mut self) {
         if self.rename_target.is_some() && self.jk_tracker.poll_expired() {
             self.rename_buffer.push('j');
+            self.update_rename_completion();
         }
         if self.nav_search_active && self.jk_tracker.poll_expired() {
             self.nav_search_query.push('j');
@@ -2150,6 +2153,7 @@ impl App {
                 'V' if self.focus == FocusSection::Main => self.toggle_visual_select(true),
                 'p' if mode.is_normal_active() => self.open_properties(),
                 'O' | 'L' if mode.is_nvim_active() => self.open_properties(),
+                'e' if self.focus == FocusSection::Main => self.start_rename_selected_task(),
                 'i' if mode.is_nvim_active() => self.start_rename_selected_task(),
                 'a' => self.handle_add_shortcut(),
                 'd' => self.handle_delete_shortcut(),
@@ -2579,6 +2583,7 @@ impl App {
             self.active_modal = ActiveModal::None;
             self.rename_target = Some(RenameTarget::Task(task.id));
             self.rename_buffer = task.title;
+            self.rename_completion = None;
             self.jk_tracker = JkEscapeTracker::default();
         }
     }
@@ -3540,6 +3545,31 @@ impl App {
     }
 
     fn handle_rename_key(&mut self, key: KeyEvent) {
+        if let Some(ref mut comp) = self.rename_completion {
+            match key.code {
+                KeyCode::Esc => {
+                    self.rename_completion = None;
+                    return;
+                }
+                KeyCode::Down => {
+                    if comp.selected + 1 < comp.items.len() {
+                        comp.selected += 1;
+                    }
+                    return;
+                }
+                KeyCode::Up => {
+                    if comp.selected > 0 {
+                        comp.selected -= 1;
+                    }
+                    return;
+                }
+                KeyCode::Tab => {
+                    self.accept_rename_completion();
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Enter => {
                 if self.jk_tracker.take_pending() {
@@ -3551,22 +3581,30 @@ impl App {
                 self.jk_tracker = JkEscapeTracker::default();
                 self.rename_target = None;
                 self.rename_buffer.clear();
+                self.rename_completion = None;
             }
             KeyCode::Backspace => {
                 if !self.jk_tracker.take_pending() {
                     self.rename_buffer.pop();
+                    self.update_rename_completion();
                 }
             }
-            KeyCode::Char(c) => match self.jk_tracker.on_char(c) {
-                JkResult::HoldJ => {}
-                JkResult::Escaped => self.commit_rename(),
-                JkResult::FlushJAndHoldNewJ => self.rename_buffer.push('j'),
-                JkResult::FlushJAndChar(ch) => {
-                    self.rename_buffer.push('j');
-                    self.rename_buffer.push(ch);
+            KeyCode::Char(c) => {
+                match self.jk_tracker.on_char(c) {
+                    JkResult::HoldJ => {}
+                    JkResult::Escaped => {
+                        self.commit_rename();
+                        return;
+                    }
+                    JkResult::FlushJAndHoldNewJ => self.rename_buffer.push('j'),
+                    JkResult::FlushJAndChar(ch) => {
+                        self.rename_buffer.push('j');
+                        self.rename_buffer.push(ch);
+                    }
+                    JkResult::Char(ch) => self.rename_buffer.push(ch),
                 }
-                JkResult::Char(ch) => self.rename_buffer.push(ch),
-            },
+                self.update_rename_completion();
+            }
             _ => {}
         }
     }
@@ -3577,6 +3615,7 @@ impl App {
         };
         let new_title = self.rename_buffer.trim().to_string();
         self.rename_buffer.clear();
+        self.rename_completion = None;
         if new_title.is_empty() {
             return;
         }
@@ -3584,23 +3623,84 @@ impl App {
         let tx = self.api_tx.clone();
         match target {
             RenameTarget::Task(id) => {
+                let parsed = crate::short_syntax::parse_short_syntax(
+                    &new_title,
+                    &self.projects,
+                    &self.tags,
+                    None,
+                    Vec::new(),
+                );
+                let mut patch_map = serde_json::Map::new();
+                let mut final_title = new_title.clone();
+                let mut check_due = false;
+
+                let mut undo_rename = None;
                 if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
                     let prev_title = t.title.clone();
-                    t.title = new_title.clone();
-                    self.push_undo(UndoOp::RenameTask {
-                        id: id.clone(),
-                        prev_title,
-                        new_title: new_title.clone(),
-                    });
-                }
-                if !self.connected || id.starts_with("offline-task-") {
-                    self.enqueue_offline_op(QueuedOp::UpdateTask {
-                        id,
-                        patch: json!({ "title": new_title }),
-                    });
+                    final_title = if parsed.title.is_empty() {
+                        prev_title.clone()
+                    } else {
+                        parsed.title.clone()
+                    };
+                    if final_title != prev_title {
+                        t.title = final_title.clone();
+                        undo_rename = Some(UndoOp::RenameTask {
+                            id: id.clone(),
+                            prev_title,
+                            new_title: final_title.clone(),
+                        });
+                    }
+                    patch_map.insert("title".to_string(), json!(final_title));
+
+                    if let Some(pid) = parsed.project_id {
+                        t.project_id = Some(pid.clone());
+                        patch_map.insert("projectId".to_string(), json!(pid));
+                    }
+                    if !parsed.tag_ids.is_empty() {
+                        for tid in parsed.tag_ids {
+                            if !t.tag_ids.contains(&tid) {
+                                t.tag_ids.push(tid);
+                            }
+                        }
+                        patch_map.insert("tagIds".to_string(), json!(t.tag_ids));
+                    }
+                    if let Some(due) = parsed.due_day {
+                        t.due_day = Some(due.clone());
+                        patch_map.insert("dueDay".to_string(), json!(due));
+                        check_due = true;
+                    }
+                    if let Some(dl) = parsed.deadline_day {
+                        t.deadline_day = Some(dl.clone());
+                        patch_map.insert("deadlineDay".to_string(), json!(dl));
+                        check_due = true;
+                    }
+                    if let Some(ts) = parsed.time_spent {
+                        t.time_spent = Some(ts);
+                        patch_map.insert("timeSpent".to_string(), json!(ts));
+                    }
+                    if let Some(te) = parsed.time_estimate {
+                        t.time_estimate = Some(te);
+                        patch_map.insert("timeEstimate".to_string(), json!(te));
+                    }
                 } else {
+                    patch_map.insert("title".to_string(), json!(final_title));
+                }
+
+                if let Some(op) = undo_rename {
+                    self.push_undo(op);
+                }
+
+                if check_due {
+                    self.check_due_and_deadline_notifications();
+                }
+
+                let patch = serde_json::Value::Object(patch_map);
+                if !self.connected || id.starts_with("offline-task-") {
+                    self.enqueue_offline_op(QueuedOp::UpdateTask { id, patch });
+                } else {
+                    let patch_fallback = patch.clone();
                     tokio::spawn(async move {
-                        match client.rename_task(&id, &new_title).await {
+                        match client.update_task(&id, patch).await {
                             Ok(t) => {
                                 let _ = tx.send(ApiEvent::TaskUpdated(t));
                             }
@@ -3608,7 +3708,7 @@ impl App {
                                 let _ = tx.send(ApiEvent::MutationOfflineFallback(
                                     QueuedOp::UpdateTask {
                                         id,
-                                        patch: json!({ "title": new_title }),
+                                        patch: patch_fallback,
                                     },
                                 ));
                             }
@@ -3825,15 +3925,10 @@ impl App {
         }
     }
 
-    fn update_title_completion(&mut self) {
-        if self.add_task_state.active_field != AddTaskField::Title {
-            self.add_task_state.completion = None;
-            return;
-        }
-        let title = &self.add_task_state.title;
-        let last_word_start = title.rfind(' ').map(|i| i + 1).unwrap_or(0);
-        let token = &title[last_word_start..];
-        if let Some(prefix) = token.strip_prefix('#') {
+    fn compute_completion_for_text(&self, text: &str) -> Option<CompletionPopup> {
+        let last_word_start = text.rfind(' ').map(|i| i + 1).unwrap_or(0);
+        let token = &text[last_word_start..];
+        let (kind, items) = if let Some(prefix) = token.strip_prefix('#') {
             let p_low = prefix.to_lowercase();
             let items: Vec<String> = self
                 .tags
@@ -3841,7 +3936,7 @@ impl App {
                 .filter(|t| p_low.is_empty() || t.title.to_lowercase().contains(&p_low))
                 .map(|t| t.title.clone())
                 .collect();
-            self.set_completion(CompletionKind::Tag, items, last_word_start);
+            (CompletionKind::Tag, items)
         } else if let Some(prefix) = token.strip_prefix('+') {
             let p_low = prefix.to_lowercase();
             let items: Vec<String> = self
@@ -3850,7 +3945,7 @@ impl App {
                 .filter(|p| p_low.is_empty() || p.title.to_lowercase().contains(&p_low))
                 .map(|p| p.title.clone())
                 .collect();
-            self.set_completion(CompletionKind::Project, items, last_word_start);
+            (CompletionKind::Project, items)
         } else if let Some(prefix) = token.strip_prefix('t')
             && (prefix.is_empty() || prefix.chars().next().is_some_and(|c| c.is_ascii_digit()))
         {
@@ -3863,7 +3958,7 @@ impl App {
                 .filter(|s| p_low.is_empty() || s.starts_with(&p_low))
                 .map(|s| (*s).to_string())
                 .collect();
-            self.set_completion(CompletionKind::Time, items, last_word_start);
+            (CompletionKind::Time, items)
         } else if let Some(prefix) = token.strip_prefix('@') {
             let p_low = prefix.to_lowercase();
             let presets = [
@@ -3883,7 +3978,7 @@ impl App {
                 .filter(|s| p_low.is_empty() || s.starts_with(&p_low))
                 .map(|s| (*s).to_string())
                 .collect();
-            self.set_completion(CompletionKind::Due, items, last_word_start);
+            (CompletionKind::Due, items)
         } else if let Some(prefix) = token.strip_prefix('!') {
             let p_low = prefix.to_lowercase();
             let presets = [
@@ -3901,23 +3996,61 @@ impl App {
                 .filter(|s| p_low.is_empty() || s.starts_with(&p_low))
                 .map(|s| (*s).to_string())
                 .collect();
-            self.set_completion(CompletionKind::Deadline, items, last_word_start);
+            (CompletionKind::Deadline, items)
         } else {
-            self.add_task_state.completion = None;
-        }
-    }
+            return None;
+        };
 
-    fn set_completion(&mut self, kind: CompletionKind, items: Vec<String>, trigger_start: usize) {
         if items.is_empty() {
-            self.add_task_state.completion = None;
+            None
         } else {
-            self.add_task_state.completion = Some(CompletionPopup {
+            Some(CompletionPopup {
                 kind,
                 items,
                 selected: 0,
-                trigger_start,
-            });
+                trigger_start: last_word_start,
+            })
         }
+    }
+
+    fn completion_prefix_char(kind: CompletionKind) -> char {
+        match kind {
+            CompletionKind::Tag => '#',
+            CompletionKind::Project => '+',
+            CompletionKind::Time => 't',
+            CompletionKind::Due => '@',
+            CompletionKind::Deadline => '!',
+        }
+    }
+
+    fn update_title_completion(&mut self) {
+        if self.add_task_state.active_field != AddTaskField::Title {
+            self.add_task_state.completion = None;
+            return;
+        }
+        self.add_task_state.completion =
+            self.compute_completion_for_text(&self.add_task_state.title);
+    }
+
+    fn update_rename_completion(&mut self) {
+        if !matches!(self.rename_target, Some(RenameTarget::Task(_))) {
+            self.rename_completion = None;
+            return;
+        }
+        self.rename_completion = self.compute_completion_for_text(&self.rename_buffer);
+    }
+
+    fn accept_rename_completion(&mut self) {
+        let Some(comp) = self.rename_completion.take() else {
+            return;
+        };
+        let Some(choice) = comp.items.get(comp.selected).cloned() else {
+            return;
+        };
+        let prefix_char = Self::completion_prefix_char(comp.kind);
+        self.rename_buffer.truncate(comp.trigger_start);
+        self.rename_buffer
+            .push_str(&format!("{prefix_char}{choice} "));
     }
 
     fn accept_completion(&mut self) {
@@ -3927,25 +4060,22 @@ impl App {
         let Some(choice) = comp.items.get(comp.selected).cloned() else {
             return;
         };
-        let prefix_char = match comp.kind {
+        match comp.kind {
             CompletionKind::Tag => {
                 if let Some(tag) = self.tags.iter().find(|t| t.title == choice)
                     && !self.add_task_state.selected_tag_ids.contains(&tag.id)
                 {
                     self.add_task_state.selected_tag_ids.push(tag.id.clone());
                 }
-                '#'
             }
             CompletionKind::Project => {
                 if let Some(idx) = self.projects.iter().position(|p| p.title == choice) {
                     self.add_task_state.project_idx = idx + 1;
                 }
-                '+'
             }
-            CompletionKind::Time => 't',
-            CompletionKind::Due => '@',
-            CompletionKind::Deadline => '!',
-        };
+            CompletionKind::Time | CompletionKind::Due | CompletionKind::Deadline => {}
+        }
+        let prefix_char = Self::completion_prefix_char(comp.kind);
         self.add_task_state.title.truncate(comp.trigger_start);
         self.add_task_state
             .title
@@ -5377,5 +5507,79 @@ mod tests {
         assert_eq!(app.settings_state.active_field, SettingsField::SoundAlerts);
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert!(!app.settings_state.sound_alerts);
+    }
+
+    #[test]
+    fn inline_edit_with_e_and_short_syntax_updates_title_estimate_due_and_tags() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let tomorrow = (Local::now().date_naive() + chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        app.projects.push(Project {
+            id: "p1".into(),
+            title: "Work".into(),
+            theme: None,
+            color: None,
+        });
+        app.tags.push(Tag {
+            id: "tag1".into(),
+            title: "urgent".into(),
+            color: None,
+            theme: None,
+        });
+        app.tasks.push(Task {
+            id: "t1".into(),
+            title: "Old title".into(),
+            is_done: false,
+            notes: None,
+            project_id: None,
+            parent_id: None,
+            tag_ids: vec![],
+            due_day: Some(today),
+            deadline_day: None,
+            remind_at: None,
+            done_on: None,
+            time_estimate: None,
+            time_spent: None,
+            repeat_cfg_id: None,
+        });
+        app.focus = FocusSection::Main;
+
+        // Press 'e' to start inline editing
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(app.rename_target, Some(RenameTarget::Task("t1".into())));
+
+        // Clear and type new title + short syntax with completion popup
+        for _ in 0.."Old title".len() {
+            app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        for ch in "Ship feature +Wo".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert!(app.rename_completion.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(app.rename_buffer.contains("+Work "));
+
+        for ch in "#urg".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert!(app.rename_completion.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        for ch in "t30m/1h @tomorrow !2026-12-31".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.rename_target, None);
+        assert_eq!(app.tasks[0].title, "Ship feature");
+        assert_eq!(app.tasks[0].project_id.as_deref(), Some("p1"));
+        assert_eq!(app.tasks[0].tag_ids, vec!["tag1".to_string()]);
+        assert_eq!(app.tasks[0].time_spent, Some(1_800_000));
+        assert_eq!(app.tasks[0].time_estimate, Some(3_600_000));
+        assert_eq!(app.tasks[0].due_day.as_deref(), Some(tomorrow.as_str()));
+        assert_eq!(app.tasks[0].deadline_day.as_deref(), Some("2026-12-31"));
     }
 }

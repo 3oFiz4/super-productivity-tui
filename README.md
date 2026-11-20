@@ -174,7 +174,7 @@ Press `:h` inside the app for the searchable, sectioned keybind manual (`j`/`k`/
 |                    | `O` / `L` / `p` / `Right-Click` | Open context Properties dropdown (task / project / tag / batch)                  |
 |                    | `v` / `V`                       | Visual multi-select (`v` toggle item, `V` range select, `Esc` / `jk` exit)       |
 |                    | `d`                             | Delete task, Project/Tag (in Sidebar), or selected tasks (in Visual mode)        |
-|                    | `i` (NVIM) / `r` (Properties)   | Rename task inline (`Enter` or `jk` to save)                                     |
+|                    | `e` / `i`                       | Edit task inline (`+proj`, `#tag`, `t1h`, `@due`, `!deadline`) with completion   |
 |                    | `s`                             | Show / hide subtasks for selected task                                           |
 |                    | `n` (Normal) / `K` (NVIM)       | Show / hide inline task note                                                     |
 |                    | `Shift+N`                       | Open full Markdown task note viewer                                              |

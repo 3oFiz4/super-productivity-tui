@@ -128,9 +128,9 @@ pub fn all_keybinds() -> Vec<KeybindEntry> {
         },
         KeybindEntry {
             section: "Tasks",
-            normal: "r (in Properties)",
-            nvim: "i",
-            description: "Rename task inline (Enter or jk to save)",
+            normal: "e",
+            nvim: "i / e",
+            description: "Edit task inline (+proj, #tag, t1h, @due, !deadline)",
             is_nvim_highlight: true,
         },
         KeybindEntry {

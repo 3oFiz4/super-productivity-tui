@@ -377,6 +377,7 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows = app.visible_task_rows();
 
     let mut task_rows = Vec::new();
+    let mut renaming_row_y: Option<u16> = None;
 
     for (row_y, (idx, (task, is_subtask))) in
         (list_area.y..list_area.bottom()).zip(rows.iter().enumerate().skip(app.task_scroll))
@@ -390,6 +391,9 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
             &app.rename_target,
             Some(crate::app::RenameTarget::Task(id)) if id == &task.id
         );
+        if is_renaming {
+            renaming_row_y = Some(row_y);
+        }
 
         let checkbox = if is_multi_selected {
             if task.is_done {
@@ -550,6 +554,19 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(Paragraph::new(Line::from(spans)), row_rect);
     }
     app.areas.task_rows = task_rows;
+
+    if let (Some(comp), Some(ry)) = (&app.rename_completion, renaming_row_y) {
+        let comp_h = (comp.items.len() as u16 + 2).min(8);
+        let comp_w = 28.min(list_area.width);
+        let comp_x = (list_area.x + 6).min(list_area.right().saturating_sub(comp_w));
+        let comp_y = if ry + 1 + comp_h <= list_area.bottom() {
+            ry + 1
+        } else {
+            ry.saturating_sub(comp_h)
+        };
+        let comp_rect = Rect::new(comp_x, comp_y, comp_w, comp_h);
+        render_completion_popup(frame, comp, comp_rect, &app.config.theme);
+    }
 
     if app.show_note && note_area.height > 0 {
         let note_text = app
@@ -1205,39 +1222,52 @@ fn render_add_task_modal(frame: &mut Frame, app: &App, area: Rect) {
         let comp_h = (comp.items.len() as u16 + 2).min(8);
         let comp_w = 28.min(inner.width);
         let comp_rect = Rect::new(inner.x + 10, inner.y + 1, comp_w, comp_h);
-        frame.render_widget(Clear, comp_rect);
-        let comp_title = match comp.kind {
-            CompletionKind::Tag => " Tags (#) ",
-            CompletionKind::Project => " Projects (+) ",
-            CompletionKind::Time => " Time (t) ",
-            CompletionKind::Due => " Due (@) ",
-            CompletionKind::Deadline => " Deadline (!) ",
-        };
-        let comp_block = Block::default()
-            .title(comp_title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(app.config.theme.accent_color()));
-        let comp_inner = comp_block.inner(comp_rect);
-        frame.render_widget(comp_block, comp_rect);
-
-        let comp_lines: Vec<Line> = comp
-            .items
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
-                let s = if i == comp.selected {
-                    Style::default()
-                        .fg(success)
-                        .bg(app.config.theme.selection_bg_color())
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(fg)
-                };
-                Line::from(Span::styled(item.clone(), s))
-            })
-            .collect();
-        frame.render_widget(Paragraph::new(comp_lines), comp_inner);
+        render_completion_popup(frame, comp, comp_rect, &app.config.theme);
     }
+}
+
+fn render_completion_popup(
+    frame: &mut Frame,
+    comp: &crate::app::CompletionPopup,
+    comp_rect: Rect,
+    theme: &crate::theme::ThemeConfig,
+) {
+    frame.render_widget(Clear, comp_rect);
+    let comp_title = match comp.kind {
+        CompletionKind::Tag => " Tags (#) ",
+        CompletionKind::Project => " Projects (+) ",
+        CompletionKind::Time => " Time (t) ",
+        CompletionKind::Due => " Due (@) ",
+        CompletionKind::Deadline => " Deadline (!) ",
+    };
+    let comp_block = Block::default()
+        .title(comp_title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent_color()));
+    let comp_inner = comp_block.inner(comp_rect);
+    frame.render_widget(comp_block, comp_rect);
+
+    let success = theme.success_color();
+    let fg = theme.fg_color();
+    let sel_bg = theme.selection_bg_color();
+
+    let comp_lines: Vec<Line> = comp
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let s = if i == comp.selected {
+                Style::default()
+                    .fg(success)
+                    .bg(sel_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(fg)
+            };
+            Line::from(Span::styled(item.clone(), s))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(comp_lines), comp_inner);
 }
 
 fn render_theme_modal(frame: &mut Frame, app: &App, area: Rect) {

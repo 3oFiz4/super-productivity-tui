@@ -136,10 +136,6 @@ impl SuperProductivityClient {
         self.update_task(id, json!({ "isDone": is_done })).await
     }
 
-    pub async fn rename_task(&self, id: &str, title: &str) -> Result<Task> {
-        self.update_task(id, json!({ "title": title })).await
-    }
-
     pub async fn delete_task(&self, id: &str) -> Result<()> {
         let resp = self
             .http
