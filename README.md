@@ -47,6 +47,8 @@ Freely manage your tasks, subtasks, projects, tags, deadlines, focus sessions, d
   - 21 built-in themes including `AMOLED`, `Catppuccin Mocha`, `Catppuccin Latte`, `Tokyo Night`, `Gruvbox Dark`, `Nord`, `Dracula`, `One Dark`, `Solarized Dark/Light`, `Monokai Pro`, `Everforest Dark`, `Kanagawa`, `Rose Pine`, `Rose Pine Moon`, `GitHub Dark`, `Ayu Dark`, `Nightfox`, `Cyberpunk`, `Material Ocean`, and `Default`.
   - Live non-dimmed preview, interactive 2D RGB map + HEX color editor, custom theme saving.
 - **Auto-Sync & Manual Sync (`S`)**: Automatically syncs on startup, after API mutations, and every **30 seconds** in the background while idle; press `S` at any time for an immediate sync, if the automatic sync fails :3.
+- **Offline Queue & Local Cache**: Queue task creations/updates locally when Super Productivity is closed and replay them automatically on reconnect.
+-
 
 ---
 
@@ -54,7 +56,6 @@ Freely manage your tasks, subtasks, projects, tags, deadlines, focus sessions, d
 
 Ranked from most prioritized to less. Want to suggest a feature? Create a Issue, and let me know!
 
-1. **Offline Queue & Local Cache**: Queue task creations/updates locally when Super Productivity is closed and replay them automatically on reconnect.
 2. **Active Time-Tracking Controls**: Start/pause/stop Super Productivity's live task timer directly from the task list with a ticking status-bar indicator.
 3. **Daily Summary & End-of-Day Review**: Interactive wrap-up modal showing completed tasks, total focus time, and carry-over prompts for unfinished tasks.
 4. **Vim Visual / Multi-Select Mode (`v` / `V`)**: Select multiple tasks to batch-complete, reschedule, move to a project, or delete in one action. Even SP didn't support this lol.
@@ -80,6 +81,7 @@ Ranked from most prioritized to less. Want to suggest a feature? Create a Issue,
 ## Bugs
 
 1. [RESOLVED] `HTTP POST` for Project and Tag creation is not possible right now, fallback to local creation instead. (#fdeeb79)
+2. `HTTP REMOVE/DELETE` for Tag ONLY is not possible right now due to Plugin limitation, fallback to local creation instead.
 
 ---
 
@@ -133,7 +135,7 @@ ORRRRRR just go to release and install it already as ready-to-use `.exe` :3:
 
 #### Companion Plugin (Create / Edit / Delete Projects & Tags)
 
-Super Productivity's Local REST API only exposes read-only `GET /projects` and `GET /tags`, so `spt` includes a lightweight companion plugin bridge (`127.0.0.1:3877`) that uses SP's internal `PluginAPI` to create, rename, recolor, and delete Projects and Tags directly inside Super Productivity:
+Super Productivity's Local REST API only exposes read-only `GET /projects` and `GET /tags`, so `spt` includes a lightweight companion plugin bridge (`127.0.0.1:3877`) that uses SP's internal `PluginAPI` to create, rename, recolor, and delete Projects and Tags (excluding `delete` method) directly inside Super Productivity:
 
 1. Open Super Productivity and go to **Settings → Plugins**.
 2. Click **Upload Plugin** and select [`plugin/sp-tui-bridge.zip`](plugin/sp-tui-bridge.zip).

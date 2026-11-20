@@ -146,6 +146,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ActiveModal::Counters => render_counters_modal(frame, app, root),
         ActiveModal::Pomodoro => render_pomodoro_modal(frame, app, root),
         ActiveModal::Reschedule => render_reschedule_modal(frame, app, root),
+        ActiveModal::DailySummary => render_daily_summary_modal(frame, app, root),
     }
 }
 
@@ -2022,6 +2023,133 @@ fn render_pomodoro_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
+fn render_daily_summary_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(76, 26, area);
+    frame.render_widget(Clear, popup);
+
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let block = Block::default()
+        .title(format!(
+            " Daily Summary & End-of-Day Review — {today} (:r / E) "
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.config.theme.border_color()))
+        .padding(Padding::uniform(1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let fg = app.config.theme.fg_color();
+    let accent = app.config.theme.accent_color();
+    let muted = app.config.theme.muted_color();
+    let success = app.config.theme.success_color();
+    let warning = app.config.theme.warning_color();
+    let sel_bg = app.config.theme.selection_bg_color();
+
+    let (completed, unfinished, total_focus_ms) = app.daily_summary_lists();
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Completed: ", Style::default().fg(muted)),
+            Span::styled(
+                format!("{}  ", completed.len()),
+                Style::default().fg(success).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Focus Time: ", Style::default().fg(muted)),
+            Span::styled(
+                format!("{}  ", format_ms(total_focus_ms)),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Pomodoro Sessions: ", Style::default().fg(muted)),
+            Span::styled(
+                format!("{}  ", app.pomodoro.completed_sessions),
+                Style::default().fg(warning).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Remaining: ", Style::default().fg(muted)),
+            Span::styled(
+                format!("{}", unfinished.len()),
+                Style::default().fg(fg).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Completed Today ({}):", completed.len()),
+            Style::default().fg(success).add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    if completed.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No tasks completed today yet.",
+            Style::default().fg(muted),
+        )));
+    } else {
+        for t in completed.iter().take(6) {
+            let spent = t
+                .time_spent
+                .filter(|ms| *ms > 0)
+                .map(|ms| format!(" ({})", format_ms(ms)))
+                .unwrap_or_default();
+            lines.push(Line::from(vec![
+                Span::styled("  \u{2713} ", Style::default().fg(success)),
+                Span::styled(format!("{}{}", t.title, spent), Style::default().fg(fg)),
+            ]));
+        }
+        if completed.len() > 6 {
+            lines.push(Line::from(Span::styled(
+                format!("  ... and {} more", completed.len() - 6),
+                Style::default().fg(muted),
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "Carry-Over Review — Unfinished Today ({}):",
+            unfinished.len()
+        ),
+        Style::default().fg(warning).add_modifier(Modifier::BOLD),
+    )));
+
+    if unfinished.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  All today's tasks are wrapped up! Great job.",
+            Style::default().fg(success),
+        )));
+    } else {
+        let sel = app
+            .daily_summary
+            .selected
+            .min(unfinished.len().saturating_sub(1));
+        let max_rows = inner.height.saturating_sub(lines.len() as u16 + 3).max(2) as usize;
+        let start = sel.saturating_sub(max_rows.saturating_sub(1));
+        for (idx, t) in unfinished.iter().enumerate().skip(start).take(max_rows) {
+            let is_sel = idx == sel;
+            let style = if is_sel {
+                Style::default()
+                    .bg(sel_bg)
+                    .fg(fg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(fg)
+            };
+            let prefix = if is_sel { "> " } else { "  " };
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}[ ] {}", t.title),
+                style,
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "j/k: select | t/Enter: Tomorrow | w: Next Week | u: Unschedule | Space: Done | A: Carry All | Esc/q: close",
+        Style::default().fg(muted),
+    )));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
 fn render_reschedule_modal(frame: &mut Frame, app: &App, area: Rect) {
     let Some(rs) = &app.reschedule_state else {
         return;
@@ -2156,6 +2284,7 @@ mod tests {
             ActiveModal::Counters,
             ActiveModal::Pomodoro,
             ActiveModal::Reschedule,
+            ActiveModal::DailySummary,
         ] {
             if modal == ActiveModal::Theme {
                 app.theme_editor = Some(ThemeEditorState::new(

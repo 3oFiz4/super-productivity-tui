@@ -74,6 +74,12 @@ pub enum ActiveModal {
     Counters,
     Pomodoro,
     Reschedule,
+    DailySummary,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DailySummaryState {
+    pub selected: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -786,6 +792,7 @@ pub struct App {
     pub counters_state: CountersState,
     pub pomodoro: PomodoroState,
     pub reschedule_state: Option<RescheduleState>,
+    pub daily_summary: DailySummaryState,
     pub theme_editor: Option<ThemeEditorState>,
 
     pub undo_stack: Vec<UndoOp>,
@@ -880,6 +887,7 @@ impl App {
             counters_state: CountersState::default(),
             pomodoro: PomodoroState::default(),
             reschedule_state: None,
+            daily_summary: DailySummaryState::default(),
             theme_editor: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -1716,6 +1724,10 @@ impl App {
                 self.handle_reschedule_key(key);
                 return;
             }
+            ActiveModal::DailySummary => {
+                self.handle_daily_summary_key(key);
+                return;
+            }
             ActiveModal::None => {}
         }
 
@@ -1859,6 +1871,12 @@ impl App {
                         self.active_modal = ActiveModal::Pomodoro;
                         return;
                     }
+                    (':', 'r') => {
+                        self.sequence.clear();
+                        self.daily_summary = DailySummaryState::default();
+                        self.active_modal = ActiveModal::DailySummary;
+                        return;
+                    }
                     ('g', 'g') => {
                         self.sequence.clear();
                         self.move_to_top();
@@ -1914,6 +1932,10 @@ impl App {
                 }
                 'P' => {
                     self.active_modal = ActiveModal::Pomodoro;
+                }
+                'E' => {
+                    self.daily_summary = DailySummaryState::default();
+                    self.active_modal = ActiveModal::DailySummary;
                 }
                 'R' => {
                     if let Some(t) = self.selected_task().cloned() {
@@ -2250,6 +2272,122 @@ impl App {
             self.rename_target = Some(RenameTarget::Task(task.id));
             self.rename_buffer = task.title;
             self.jk_tracker = JkEscapeTracker::default();
+        }
+    }
+
+    pub fn daily_summary_lists(&self) -> (Vec<&Task>, Vec<&Task>, u64) {
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let start_of_today = Local::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|dt| dt.and_local_timezone(Local).single())
+            .map(|dt| dt.timestamp_millis() as u64)
+            .unwrap_or(0);
+
+        let completed: Vec<&Task> = self
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.parent_id.is_none()
+                    && t.is_done
+                    && (t.due_day.as_deref() == Some(today.as_str())
+                        || t.done_on.is_some_and(|ms| ms >= start_of_today))
+            })
+            .collect();
+
+        let unfinished: Vec<&Task> = self
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.parent_id.is_none() && !t.is_done && t.due_day.as_deref() == Some(today.as_str())
+            })
+            .collect();
+
+        let total_focus_ms: u64 = completed
+            .iter()
+            .chain(unfinished.iter())
+            .filter_map(|t| t.time_spent)
+            .sum();
+
+        (completed, unfinished, total_focus_ms)
+    }
+
+    fn handle_daily_summary_key(&mut self, key: KeyEvent) {
+        let unfinished_ids: Vec<String> = self
+            .daily_summary_lists()
+            .1
+            .into_iter()
+            .map(|t| t.id.clone())
+            .collect();
+        let len = unfinished_ids.len();
+        if len > 0 && self.daily_summary.selected >= len {
+            self.daily_summary.selected = len - 1;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.active_modal = ActiveModal::None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if len > 0 {
+                    self.daily_summary.selected = (self.daily_summary.selected + 1) % len;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if len > 0 {
+                    self.daily_summary.selected = (self.daily_summary.selected + len - 1) % len;
+                }
+            }
+            KeyCode::Char('t') | KeyCode::Enter => {
+                if let Some(tid) = unfinished_ids.get(self.daily_summary.selected).cloned() {
+                    let tomorrow = (Local::now() + ChronoDuration::days(1))
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    self.schedule_task(&tid, Some(tomorrow));
+                    self.status_message = "Carried over to Tomorrow".to_string();
+                }
+            }
+            KeyCode::Char('w') => {
+                if let Some(tid) = unfinished_ids.get(self.daily_summary.selected).cloned() {
+                    let next_week = (Local::now() + ChronoDuration::days(7))
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    self.schedule_task(&tid, Some(next_week));
+                    self.status_message = "Carried over to Next Week".to_string();
+                }
+            }
+            KeyCode::Char('u') => {
+                if let Some(tid) = unfinished_ids.get(self.daily_summary.selected).cloned() {
+                    self.schedule_task(&tid, None);
+                    self.status_message = "Unscheduled task".to_string();
+                }
+            }
+            KeyCode::Char(' ') => {
+                if let Some(tid) = unfinished_ids.get(self.daily_summary.selected).cloned() {
+                    if let Some(t) = self.tasks.iter_mut().find(|t| t.id == tid) {
+                        t.is_done = true;
+                        self.push_undo(UndoOp::ToggleDone {
+                            id: tid.clone(),
+                            prev_done: false,
+                        });
+                    }
+                    self.spawn_patch(tid, json!({ "isDone": true }));
+                    self.status_message = "Marked done".to_string();
+                }
+            }
+            KeyCode::Char('A') => {
+                let tomorrow = (Local::now() + ChronoDuration::days(1))
+                    .format("%Y-%m-%d")
+                    .to_string();
+                let count = unfinished_ids.len();
+                for tid in unfinished_ids {
+                    self.schedule_task(&tid, Some(tomorrow.clone()));
+                }
+                if count > 0 {
+                    self.status_message = format!("Carried over {count} task(s) to Tomorrow");
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4487,5 +4625,56 @@ mod tests {
         assert_eq!(app.nav_selected, second_idx);
         app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
         assert_eq!(app.nav_selected, first_idx);
+    }
+
+    #[test]
+    fn daily_summary_shows_totals_and_carries_over_unfinished() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let tomorrow = (Local::now() + ChronoDuration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        app.tasks.push(Task {
+            id: "done-1".into(),
+            title: "Finished task".into(),
+            is_done: true,
+            notes: None,
+            project_id: None,
+            parent_id: None,
+            tag_ids: vec![],
+            due_day: Some(today.clone()),
+            deadline_day: None,
+            done_on: None,
+            time_estimate: None,
+            time_spent: Some(1_800_000),
+            repeat_cfg_id: None,
+        });
+        app.tasks.push(Task {
+            id: "todo-1".into(),
+            title: "Carry me over".into(),
+            is_done: false,
+            notes: None,
+            project_id: None,
+            parent_id: None,
+            tag_ids: vec![],
+            due_day: Some(today.clone()),
+            deadline_day: None,
+            done_on: None,
+            time_estimate: None,
+            time_spent: Some(600_000),
+            repeat_cfg_id: None,
+        });
+
+        let (completed, unfinished, focus_ms) = app.daily_summary_lists();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(unfinished.len(), 1);
+        assert_eq!(focus_ms, 2_400_000);
+
+        // Open via Shift+E and carry over to Tomorrow with 't'
+        app.handle_key(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT));
+        assert_eq!(app.active_modal, ActiveModal::DailySummary);
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(app.tasks[1].due_day.as_deref(), Some(tomorrow.as_str()));
     }
 }
