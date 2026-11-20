@@ -166,14 +166,40 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         area,
     );
     let (top_rows, bottom_rows) = app.nav_rows();
+    let search_h = if app.nav_search_active || !app.nav_search_query.is_empty() {
+        1
+    } else {
+        0
+    };
     let bottom_h = bottom_rows.len() as u16 + 1;
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(bottom_h)])
+        .constraints([
+            Constraint::Length(search_h),
+            Constraint::Min(3),
+            Constraint::Length(bottom_h),
+        ])
         .split(area);
 
-    let top_area = sections[0];
-    let bottom_area = sections[1];
+    if search_h > 0 {
+        let cursor = if app.nav_search_active { "_" } else { "" };
+        let bar = Line::from(vec![
+            Span::styled(
+                " /",
+                Style::default()
+                    .fg(app.config.theme.accent_color())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}{} ", app.nav_search_query, cursor),
+                Style::default().fg(app.config.theme.fg_color()),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(bar), sections[0]);
+    }
+
+    let top_area = sections[1];
+    let bottom_area = sections[2];
 
     let mut global_idx = 0;
     for (i, row) in top_rows.iter().enumerate() {
@@ -231,6 +257,11 @@ fn render_nav_row(frame: &mut Frame, app: &App, row: &crate::app::NavRow, idx: u
     let mut style = Style::default().fg(fg);
     if is_active_filter {
         style = style.add_modifier(Modifier::BOLD);
+    }
+    if app.nav_row_matches(&row.label) {
+        style = style
+            .fg(app.config.theme.warning_color())
+            .add_modifier(Modifier::BOLD);
     }
     if is_selected {
         style = style

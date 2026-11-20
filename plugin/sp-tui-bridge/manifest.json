@@ -1,11 +1,11 @@
 {
   "name": "Super Productivity TUI Bridge",
   "id": "sp-tui-bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minSupVersion": "14.0.0",
   "manifestVersion": 1,
   "description": "Companion bridge enabling Project and Tag creation, editing, and deletion from Super-Productivity-TUI (spt).",
   "iFrame": false,
-  "permissions": [],
+  "permissions": ["deleteProject"],
   "hooks": []
 }

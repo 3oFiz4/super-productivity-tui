@@ -757,6 +757,8 @@ pub struct App {
     pub expanded_subtasks: HashSet<String>,
     pub search_active: bool,
     pub search_query: String,
+    pub nav_search_active: bool,
+    pub nav_search_query: String,
     pub rename_target: Option<RenameTarget>,
     pub rename_buffer: String,
     pub jk_tracker: JkEscapeTracker,
@@ -851,6 +853,8 @@ impl App {
             expanded_subtasks: HashSet::new(),
             search_active: false,
             search_query: String::new(),
+            nav_search_active: false,
+            nav_search_query: String::new(),
             rename_target: None,
             rename_buffer: String::new(),
             jk_tracker: JkEscapeTracker::default(),
@@ -1715,6 +1719,28 @@ impl App {
             ActiveModal::None => {}
         }
 
+        if self.nav_search_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.nav_search_active = false;
+                    self.nav_search_query.clear();
+                }
+                KeyCode::Enter => {
+                    self.nav_search_active = false;
+                }
+                KeyCode::Backspace => {
+                    self.nav_search_query.pop();
+                    self.jump_nav_match(true, true);
+                }
+                KeyCode::Char(c) => {
+                    self.nav_search_query.push(c);
+                    self.jump_nav_match(true, true);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.search_active {
             match key.code {
                 KeyCode::Esc => {
@@ -1902,7 +1928,15 @@ impl App {
                 't' => self.toggle_timer(),
                 's' => self.toggle_subtasks(),
                 '/' => {
-                    self.search_active = true;
+                    if self.focus == FocusSection::Nav {
+                        self.nav_search_active = true;
+                        self.nav_search_query.clear();
+                    } else {
+                        self.search_active = true;
+                    }
+                }
+                'N' if self.focus == FocusSection::Nav && !self.nav_search_query.is_empty() => {
+                    self.jump_nav_match(false, false);
                 }
                 'N' => {
                     if self.selected_task().is_some() {
@@ -1914,6 +1948,9 @@ impl App {
                 'i' if mode.is_nvim_active() => self.start_rename_selected_task(),
                 'a' => self.handle_add_shortcut(),
                 'd' => self.handle_delete_shortcut(),
+                'n' if self.focus == FocusSection::Nav && !self.nav_search_query.is_empty() => {
+                    self.jump_nav_match(true, false);
+                }
                 'n' if mode.is_normal_active() => self.show_note = !self.show_note,
                 'K' if mode.is_nvim_active() => self.show_note = !self.show_note,
                 'u' => self.undo(),
@@ -2213,6 +2250,37 @@ impl App {
             self.rename_target = Some(RenameTarget::Task(task.id));
             self.rename_buffer = task.title;
             self.jk_tracker = JkEscapeTracker::default();
+        }
+    }
+
+    pub fn nav_row_matches(&self, label: &str) -> bool {
+        let q = self.nav_search_query.trim().to_lowercase();
+        !q.is_empty() && fuzzy_match(&label.to_lowercase(), &q)
+    }
+
+    fn jump_nav_match(&mut self, forward: bool, include_current: bool) {
+        let rows = self.all_nav_rows();
+        let len = rows.len();
+        if len == 0 || self.nav_search_query.trim().is_empty() {
+            return;
+        }
+        let start = if include_current {
+            self.nav_selected % len
+        } else if forward {
+            (self.nav_selected + 1) % len
+        } else {
+            (self.nav_selected + len - 1) % len
+        };
+        for offset in 0..len {
+            let idx = if forward {
+                (start + offset) % len
+            } else {
+                (start + len - offset) % len
+            };
+            if self.nav_row_matches(&rows[idx].label) {
+                self.nav_selected = idx;
+                return;
+            }
         }
     }
 
@@ -4368,5 +4436,56 @@ mod tests {
         });
         assert_eq!(app.projects[0].id, "real-sp-proj-123");
         assert_eq!(app.tasks[0].project_id.as_deref(), Some("real-sp-proj-123"));
+    }
+
+    #[test]
+    fn nav_fuzzy_finder_cycles_matches_with_n_and_shift_n() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        app.projects.push(Project {
+            id: "p1".into(),
+            title: "Alpha Work".into(),
+            theme: None,
+            color: None,
+        });
+        app.projects.push(Project {
+            id: "p2".into(),
+            title: "Beta Home".into(),
+            theme: None,
+            color: None,
+        });
+        app.projects.push(Project {
+            id: "p3".into(),
+            title: "Alpha Gym".into(),
+            theme: None,
+            color: None,
+        });
+        app.focus = FocusSection::Nav;
+
+        // Open nav fuzzy finder and type "alp"
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.nav_search_active);
+        for c in ['a', 'l', 'p'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.nav_search_active);
+
+        let rows = app.all_nav_rows();
+        let first_idx = rows
+            .iter()
+            .position(|r| r.label == "Alpha Work")
+            .expect("Alpha Work row");
+        let second_idx = rows
+            .iter()
+            .position(|r| r.label == "Alpha Gym")
+            .expect("Alpha Gym row");
+        assert_eq!(app.nav_selected, first_idx);
+
+        // 'n' moves forward to next match, 'N' moves back
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.nav_selected, second_idx);
+        app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert_eq!(app.nav_selected, first_idx);
     }
 }
