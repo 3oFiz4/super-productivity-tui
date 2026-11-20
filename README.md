@@ -63,6 +63,10 @@ Ranked from most prioritized to less. Want to suggest a feature? Create a Issue,
 21. **Undo/Redo Persistence**: Persist the 100-step undo history across `spt` restarts.
 22. **Custom Nerd Font / ASCII Icon Toggle**: Config option to switch cleanly between Nerd Font glyphs and pure ASCII/Unicode symbols.
 
+## Bugs
+
+1. `HTTP POST` for Project and Tag creation is not possible right now, fallback to local creation instead.
+
 ---
 
 ## Requirements
