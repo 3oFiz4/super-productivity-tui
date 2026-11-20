@@ -1,10 +1,12 @@
 use crate::api::SuperProductivityClient;
 use crate::config::AppConfig;
-use crate::models::{CreateTaskPayload, Task};
+use crate::models::{CreateTaskPayload, Project, Tag, Task};
 use crate::offline::{OfflineCache, QueuedOp, sanitize_create_payload_for_sp};
 use crate::short_syntax::{parse_duration_ms, parse_short_syntax};
+use crate::theme::ThemeConfig;
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Duration as ChronoDuration, Local, NaiveDate, NaiveTime};
+use ratatui::style::Color;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::net::TcpStream;
@@ -12,83 +14,124 @@ use std::time::Duration;
 
 pub async fn run(args: Vec<String>) -> Result<()> {
     let Some((cmd, rest)) = args.split_first() else {
-        print_help();
+        print_help(&AppConfig::load().theme, true);
         return Ok(());
     };
 
+    let color_on =
+        !has_any_flag(&args, &["--no-color", "-C"]) && std::env::var_os("NO_COLOR").is_none();
+
     match cmd.as_str() {
         "-h" | "--help" | "help" => {
-            print_help();
+            print_help(&AppConfig::load().theme, color_on);
             Ok(())
         }
         "-V" | "--version" | "version" => {
             println!("spt {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        "add" => cmd_add(rest).await,
-        "ls" | "list" => cmd_ls(rest).await,
-        "done" => cmd_done(rest, false).await,
-        "undo-done" | "reopen" => cmd_done(rest, true).await,
-        "edit" => cmd_edit(rest).await,
-        "schedule" | "sched" => cmd_schedule(rest).await,
-        "rm" | "delete" => cmd_rm(rest).await,
-        "start" => cmd_start(rest).await,
-        "stop" => cmd_stop(rest).await,
-        "log" => cmd_log(rest).await,
-        "status" => cmd_status(rest).await,
-        "current" => cmd_current(rest).await,
-        "projects" => cmd_projects(rest).await,
-        "tags" => cmd_tags(rest).await,
-        "counter" | "counters" => cmd_counter(rest),
-        "summary" => cmd_summary(rest).await,
-        "worklog" => cmd_worklog(rest).await,
-        "sync" => cmd_sync(rest).await,
-        "doctor" => cmd_doctor(rest).await,
+        "add" => cmd_add(rest, color_on).await,
+        "ls" | "list" => cmd_ls(rest, color_on).await,
+        "done" => cmd_done(rest, false, color_on).await,
+        "undo-done" | "reopen" => cmd_done(rest, true, color_on).await,
+        "edit" => cmd_edit(rest, color_on).await,
+        "schedule" | "sched" => cmd_schedule(rest, color_on).await,
+        "rm" | "delete" => cmd_rm(rest, color_on).await,
+        "start" => cmd_start(rest, color_on).await,
+        "stop" => cmd_stop(rest, color_on).await,
+        "log" => cmd_log(rest, color_on).await,
+        "status" => cmd_status(rest, color_on).await,
+        "current" => cmd_current(rest, color_on).await,
+        "projects" => cmd_projects(rest, color_on).await,
+        "tags" => cmd_tags(rest, color_on).await,
+        "counter" | "counters" => cmd_counter(rest, color_on),
+        "summary" => cmd_summary(rest, color_on).await,
+        "worklog" => cmd_worklog(rest, color_on).await,
+        "sync" => cmd_sync(rest, color_on).await,
+        "doctor" => cmd_doctor(rest, color_on).await,
         other => bail!("Unknown subcommand '{other}'. Run `spt --help` for usage."),
     }
 }
 
-fn print_help() {
+fn paint(c: Color, text: &str, enabled: bool) -> String {
+    if !enabled {
+        return text.to_string();
+    }
+    let rgb = color_to_rgb(c);
+    format!("\x1b[38;2;{};{};{}m{text}\x1b[0m", rgb[0], rgb[1], rgb[2])
+}
+
+fn paint_bold(c: Color, text: &str, enabled: bool) -> String {
+    if !enabled {
+        return text.to_string();
+    }
+    let rgb = color_to_rgb(c);
+    format!("\x1b[1;38;2;{};{};{}m{text}\x1b[0m", rgb[0], rgb[1], rgb[2])
+}
+
+fn color_to_rgb(c: Color) -> [u8; 3] {
+    match c {
+        Color::Rgb(r, g, b) => [r, g, b],
+        Color::Magenta => [203, 166, 247],
+        Color::Green => [166, 227, 161],
+        Color::Yellow => [249, 226, 175],
+        Color::Red => [243, 139, 168],
+        Color::Blue => [137, 180, 250],
+        Color::Cyan => [148, 226, 213],
+        _ => [205, 214, 244],
+    }
+}
+
+fn print_help(theme: &ThemeConfig, color_on: bool) {
+    let hdr = paint_bold(theme.accent_color(), "spt", color_on);
+    let ver = env!("CARGO_PKG_VERSION");
     println!(
-        r#"spt {} — Super Productivity TUI & CLI
+        r#"{hdr} {ver} — Super Productivity TUI & CLI
 
 USAGE:
     spt                     Launch interactive TUI
     spt <COMMAND> [ARGS]    Run non-interactive CLI command
 
+GLOBAL FLAGS:
+    -j, --json              Output structured JSON
+    -C, --no-color          Disable ANSI theme colors
+
 COMMANDS:
-    add <title...>          Add task using short syntax (+proj #tag t1h @due !deadline)
-                            Flags: --top, --note <text>, --parent <id>, --json
-    ls [view]               List tasks (views: all, today, inbox, planned, overdue)
-                            Flags: --project <p>, --tag <t>, --search <q>, --done, --limit <n>, --json
-    done <id|query>         Mark task done (--undo to reopen, --json)
-    undo-done <id|query>    Reopen a completed task (--json)
-    edit <id|query> <...>   Edit task inline with short syntax (--json)
-    schedule <id|q> <when>  Schedule task (today, tomorrow, next-week, YYYY-MM-DD, clear)
-                            Flags: --remind <HH:MM>, --json
-    rm <id|query>           Delete a task (--json)
-    start <id|query>        Start timer on task (--json)
-    stop                    Stop active task timer (--json)
-    log <id|query> <dur>    Add time spent (e.g. 25m, 1h30m) (--json)
-    status                  Single-line status (--waybar, --tmux, --json)
-    current                 Show currently tracked task (exits 1 if idle) (--json)
-    projects                List projects (--json)
-    tags                    List tags (--json)
-    counter [act] [name]    Manage counters: list, inc, dec, set <name> [val] (--json)
-    summary [today]         Show today's completed/unfinished summary (--json)
-    worklog                 Show time-tracking breakdown (--day|--week|--month, --by project|tag, --json)
-    sync                    Flush offline queue and refresh local cache (--json)
-    doctor                  Check API, companion bridge, config, and cache health (--json)"#,
-        env!("CARGO_PKG_VERSION")
+    add <title...>          Add task with short syntax (+proj #tag t1h @due !deadline) & typo auto-fix
+                            Flags: -t/--top, -n/--note <text>, -P/--parent <id>, -j/--json
+    ls [view]               Tree-formatted task list (all, today, inbox, planned, overdue)
+                            Flags: -p/--project <p>, -g/--tag <t>, -s/--search <q>, -d/--done, -l/--limit <n>
+    done <id|pattern|q>     Mark task done (-u/--undo to reopen)
+    undo-done <id|pat|q>    Reopen a completed task
+    edit <id|pat|q> <...>   Edit task inline with short syntax & typo auto-fix
+    schedule <id|p> <when>  Schedule (today, tomorrow, next-week, YYYY-MM-DD, clear) [-r/--remind HH:MM]
+    rm <id|pattern|q>       Delete a task
+    start <id|pattern|q>    Start timer on task
+    stop                    Stop active task timer
+    log <id|pat|q> <dur>    Add time spent (e.g. 25m, 1h30m)
+    status                  Single-line status (-w/--waybar, -T/--tmux, -j/--json)
+    current                 Show currently tracked task (exits 1 if idle)
+    projects                List projects with theme colors
+    tags                    List tags with theme colors
+    counter [act] [name]    Manage counters: list, inc, dec, set <name> [val]
+    summary [today]         Show today's completed/unfinished summary
+    worklog                 Time-tracking breakdown (-D/--day, -w/--week, -m/--month, -b/--by project|tag)
+    sync                    Flush offline queue and refresh local cache
+    doctor                  Check API, companion bridge, config, and cache health
+
+ID PATTERNS:
+    Supports SQL-like dot patterns: 'G2.' (starts with G2), '._g' (ends with _g), 'G2.k_g' (G2...k_g)"#
     );
 }
 
-fn has_flag(args: &[String], flag: &str) -> bool {
-    args.iter().any(|a| a == flag)
+fn has_any_flag(args: &[String], flags: &[&str]) -> bool {
+    args.iter().any(|a| flags.contains(&a.as_str()))
 }
 
-fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
+fn flag_any_value(args: &[String], flags: &[&str]) -> Option<String> {
+    args.windows(2)
+        .find(|w| flags.contains(&w[0].as_str()))
+        .map(|w| w[1].clone())
 }
 
 fn positional_args(args: &[String], value_flags: &[&str]) -> Vec<String> {
@@ -103,7 +146,7 @@ fn positional_args(args: &[String], value_flags: &[&str]) -> Vec<String> {
             skip_next = true;
             continue;
         }
-        if a.starts_with("--") {
+        if a.starts_with("--") || (a.starts_with('-') && a.len() == 2) {
             continue;
         }
         out.push(a.clone());
@@ -112,6 +155,7 @@ fn positional_args(args: &[String], value_flags: &[&str]) -> Vec<String> {
 }
 
 struct Snapshot {
+    theme: ThemeConfig,
     client: SuperProductivityClient,
     cache: OfflineCache,
     online: bool,
@@ -119,6 +163,7 @@ struct Snapshot {
 
 async fn load_snapshot(refresh: bool) -> Snapshot {
     let config = AppConfig::load();
+    let theme = config.theme.clone();
     let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
     let mut cache = OfflineCache::load();
     let mut online = false;
@@ -145,13 +190,14 @@ async fn load_snapshot(refresh: bool) -> Snapshot {
     }
 
     Snapshot {
+        theme,
         client,
         cache,
         online,
     }
 }
 
-fn all_projects(cache: &OfflineCache) -> Vec<crate::models::Project> {
+fn all_projects(cache: &OfflineCache) -> Vec<Project> {
     let mut merged = cache.projects.clone();
     for lp in &cache.local_projects {
         if !merged.iter().any(|p| p.id == lp.id) {
@@ -161,7 +207,7 @@ fn all_projects(cache: &OfflineCache) -> Vec<crate::models::Project> {
     merged
 }
 
-fn all_tags(cache: &OfflineCache) -> Vec<crate::models::Tag> {
+fn all_tags(cache: &OfflineCache) -> Vec<Tag> {
     let mut merged = cache.tags.clone();
     for lt in &cache.local_tags {
         if !merged.iter().any(|t| t.id == lt.id) {
@@ -171,9 +217,184 @@ fn all_tags(cache: &OfflineCache) -> Vec<crate::models::Tag> {
     merged
 }
 
+/// SQL-like dot pattern matching on IDs:
+/// - `G2.` matches IDs starting with `G2` (`G2%`)
+/// - `._g` matches IDs ending with `_g` (`%_g`)
+/// - `G2.k_g` matches IDs starting with `G2` and ending with `k_g` (`G2%k_g`)
+/// - `.Yuk.` matches IDs containing `Yuk` (`%Yuk%`)
+pub fn match_dot_pattern(id: &str, pattern: &str) -> bool {
+    if !pattern.contains('.') {
+        return id == pattern;
+    }
+    let parts: Vec<&str> = pattern.split('.').collect();
+    let first = parts[0];
+    let last = parts[parts.len() - 1];
+
+    if !first.is_empty() && !id.starts_with(first) {
+        return false;
+    }
+    if !last.is_empty() && !id.ends_with(last) {
+        return false;
+    }
+    if parts.len() == 2 && first.len() + last.len() > id.len() {
+        return false;
+    }
+
+    let mut cursor = first.len();
+    let end_limit = id.len().saturating_sub(last.len());
+    for mid in &parts[1..parts.len() - 1] {
+        if mid.is_empty() {
+            continue;
+        }
+        let Some(pos) = id[cursor..end_limit].find(mid) else {
+            return false;
+        };
+        cursor += pos + mid.len();
+    }
+    true
+}
+
+pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (n, m) = (a.len(), b.len());
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for (i, row) in dp.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in dp[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=n {
+        for j in 1..=m {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut d = (dp[i - 1][j] + 1)
+                .min(dp[i][j - 1] + 1)
+                .min(dp[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d = d.min(dp[i - 2][j - 2] + cost);
+            }
+            dp[i][j] = d;
+        }
+    }
+    dp[n][m]
+}
+
+fn best_fuzzy_match<'a>(needle: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    let n_low = needle.to_lowercase();
+    if n_low.is_empty() {
+        return None;
+    }
+    if let Some(&exact) = candidates.iter().find(|c| c.to_lowercase() == n_low) {
+        return Some(exact);
+    }
+    let max_dist = if n_low.len() >= 6 { 3 } else { 2 };
+    let mut best: Option<(&str, usize)> = None;
+    for &cand in candidates {
+        let c_low = cand.to_lowercase();
+        let dist = damerau_levenshtein(&n_low, &c_low);
+        if dist <= max_dist && best.is_none_or(|(_, bd)| dist < bd) {
+            best = Some((cand, dist));
+        }
+    }
+    best.map(|(c, _)| c)
+}
+
+/// Auto-corrects typos in `#tag`, `+project`, `@date_keyword`, and `!date_keyword`.
+pub fn autocorrect_short_syntax(
+    raw: &str,
+    projects: &[Project],
+    tags: &[Tag],
+) -> (String, Vec<String>) {
+    const DATE_KEYWORDS: &[&str] = &[
+        "today",
+        "tomorrow",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "next_week",
+        "next_month",
+    ];
+    let tag_names: Vec<&str> = tags.iter().map(|t| t.title.as_str()).collect();
+    let proj_names: Vec<&str> = projects.iter().map(|p| p.title.as_str()).collect();
+    let mut corrections = Vec::new();
+    let mut out_tokens = Vec::new();
+
+    for tok in raw.split_whitespace() {
+        if let Some(name) = tok.strip_prefix('#')
+            && !name.is_empty()
+            && !tag_names.iter().any(|t| t.eq_ignore_ascii_case(name))
+            && let Some(fixed) = best_fuzzy_match(name, &tag_names)
+        {
+            let replacement = format!("#{fixed}");
+            corrections.push(format!("{tok} -> {replacement}"));
+            out_tokens.push(replacement);
+            continue;
+        }
+        if let Some(name) = tok.strip_prefix('+')
+            && !name.is_empty()
+            && !proj_names.iter().any(|p| p.eq_ignore_ascii_case(name))
+            && let Some(fixed) = best_fuzzy_match(name, &proj_names)
+        {
+            let replacement = format!("+{fixed}");
+            corrections.push(format!("{tok} -> {replacement}"));
+            out_tokens.push(replacement);
+            continue;
+        }
+        if let Some(kw) = tok.strip_prefix('@')
+            && kw.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+            && !DATE_KEYWORDS.iter().any(|d| d.eq_ignore_ascii_case(kw))
+            && let Some(fixed) = best_fuzzy_match(kw, DATE_KEYWORDS)
+        {
+            let replacement = format!("@{fixed}");
+            corrections.push(format!("{tok} -> {replacement}"));
+            out_tokens.push(replacement);
+            continue;
+        }
+        if let Some(kw) = tok.strip_prefix('!')
+            && kw.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+            && !DATE_KEYWORDS.iter().any(|d| d.eq_ignore_ascii_case(kw))
+            && let Some(fixed) = best_fuzzy_match(kw, DATE_KEYWORDS)
+        {
+            let replacement = format!("!{fixed}");
+            corrections.push(format!("{tok} -> {replacement}"));
+            out_tokens.push(replacement);
+            continue;
+        }
+        out_tokens.push(tok.to_string());
+    }
+
+    (out_tokens.join(" "), corrections)
+}
+
 pub fn resolve_task<'a>(tasks: &'a [Task], query: &str) -> Result<&'a Task> {
     if let Some(exact) = tasks.iter().find(|t| t.id == query) {
         return Ok(exact);
+    }
+    if query.contains('.') {
+        let dot_matches: Vec<&Task> = tasks
+            .iter()
+            .filter(|t| match_dot_pattern(&t.id, query))
+            .collect();
+        match dot_matches.len() {
+            0 => bail!("No task ID matching pattern '{query}'."),
+            1 => return Ok(dot_matches[0]),
+            n => {
+                let preview: Vec<String> = dot_matches
+                    .iter()
+                    .take(5)
+                    .map(|t| format!("  {}  {}", t.id, t.title))
+                    .collect();
+                bail!(
+                    "Pattern '{query}' matched {n} tasks. Be more specific:\n{}",
+                    preview.join("\n")
+                );
+            }
+        }
     }
     let prefix_matches: Vec<&Task> = tasks.iter().filter(|t| t.id.starts_with(query)).collect();
     if prefix_matches.len() == 1 {
@@ -194,7 +415,7 @@ pub fn resolve_task<'a>(tasks: &'a [Task], query: &str) -> Result<&'a Task> {
                 .map(|t| format!("  {}  {}", t.id, t.title))
                 .collect();
             bail!(
-                "Ambiguous query '{query}' matched {n} tasks. Use a task ID:\n{}",
+                "Ambiguous query '{query}' matched {n} tasks. Use an ID or dot pattern (e.g. G2.):\n{}",
                 preview.join("\n")
             );
         }
@@ -212,24 +433,84 @@ fn format_ms(ms: u64) -> String {
     }
 }
 
-async fn cmd_add(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
-    let to_top = has_flag(args, "--top");
-    let note = flag_value(args, "--note");
-    let parent_id = flag_value(args, "--parent");
-    let pos = positional_args(args, &["--note", "--parent"]);
+fn format_task_meta(
+    t: &Task,
+    projects: &[Project],
+    tags: &[Tag],
+    today: &str,
+    theme: &ThemeConfig,
+    color_on: bool,
+) -> String {
+    let mut parts = Vec::new();
+    let spent = t.time_spent.unwrap_or(0);
+    let est = t.time_estimate.unwrap_or(0);
+    if spent > 0 || est > 0 {
+        parts.push(paint(
+            theme.muted_color(),
+            &format!("⏱ {}/{}", format_ms(spent), format_ms(est)),
+            color_on,
+        ));
+    }
+    if let Some(pid) = &t.project_id
+        && let Some(p) = projects.iter().find(|p| &p.id == pid)
+    {
+        parts.push(paint(p.display_color(), &format!("+{}", p.title), color_on));
+    }
+    for tid in &t.tag_ids {
+        if let Some(tag) = tags.iter().find(|tg| &tg.id == tid) {
+            parts.push(paint(
+                tag.display_color(),
+                &format!("#{}", tag.title),
+                color_on,
+            ));
+        }
+    }
+    if let Some(due) = &t.due_day {
+        let c = if due.as_str() < today {
+            theme.danger_color()
+        } else if due.as_str() == today {
+            theme.warning_color()
+        } else {
+            theme.muted_color()
+        };
+        parts.push(paint(c, &format!("@{due}"), color_on));
+    }
+    if let Some(dl) = &t.deadline_day {
+        let c = if dl.as_str() <= today {
+            theme.danger_color()
+        } else {
+            theme.accent_color()
+        };
+        parts.push(paint(c, &format!("!{dl}"), color_on));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", parts.join(" "))
+    }
+}
+
+async fn cmd_add(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
+    let to_top = has_any_flag(args, &["--top", "-t"]);
+    let note = flag_any_value(args, &["--note", "-n"]);
+    let parent_id = flag_any_value(args, &["--parent", "-P"]);
+    let pos = positional_args(args, &["--note", "-n", "--parent", "-P"]);
     let raw = pos.join(" ").trim().to_string();
     if raw.is_empty() {
-        bail!("Usage: spt add \"<title + short syntax>\" [--top] [--note <text>] [--parent <id>]");
+        bail!(
+            "Usage: spt add \"<title + short syntax>\" [-t|--top] [-n|--note <text>] [-P|--parent <id>]"
+        );
     }
 
     let mut snap = load_snapshot(true).await;
     let projects = all_projects(&snap.cache);
     let tags = all_tags(&snap.cache);
-    let parsed = parse_short_syntax(&raw, &projects, &tags, None, Vec::new());
+    let (corrected_raw, corrections) = autocorrect_short_syntax(&raw, &projects, &tags);
+    let parsed = parse_short_syntax(&corrected_raw, &projects, &tags, None, Vec::new());
     let payload = CreateTaskPayload {
         title: if parsed.title.is_empty() {
-            raw.clone()
+            corrected_raw.clone()
         } else {
             parsed.title
         },
@@ -261,7 +542,29 @@ async fn cmd_add(args: &[String]) -> Result<()> {
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&created)?);
             } else {
-                println!("Created [{}] {}", created.id, created.title);
+                if !corrections.is_empty() {
+                    println!(
+                        "{}",
+                        paint(
+                            snap.theme.warning_color(),
+                            &format!("Auto-corrected: {}", corrections.join(", ")),
+                            color_on
+                        )
+                    );
+                }
+                let today = Local::now().format("%Y-%m-%d").to_string();
+                let meta =
+                    format_task_meta(&created, &projects, &tags, &today, &snap.theme, color_on);
+                println!(
+                    "{} {} {}{meta}",
+                    paint_bold(snap.theme.success_color(), "✓ Created", color_on),
+                    paint_bold(snap.theme.fg_color(), &created.title, color_on),
+                    paint(
+                        snap.theme.muted_color(),
+                        &format!("({})", created.id),
+                        color_on
+                    )
+                );
             }
             return Ok(());
         }
@@ -298,19 +601,50 @@ async fn cmd_add(args: &[String]) -> Result<()> {
     if json_out {
         println!("{}", serde_json::to_string_pretty(&task)?);
     } else {
-        println!("Queued offline [{}] {}", task.id, task.title);
+        if !corrections.is_empty() {
+            println!(
+                "{}",
+                paint(
+                    snap.theme.warning_color(),
+                    &format!("Auto-corrected: {}", corrections.join(", ")),
+                    color_on
+                )
+            );
+        }
+        println!(
+            "{} {} {}",
+            paint_bold(snap.theme.warning_color(), "⏳ Queued offline", color_on),
+            paint_bold(snap.theme.fg_color(), &task.title, color_on),
+            paint(
+                snap.theme.muted_color(),
+                &format!("({})", task.id),
+                color_on
+            )
+        );
     }
     Ok(())
 }
 
-async fn cmd_ls(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
-    let include_done = has_flag(args, "--done");
-    let proj_filter = flag_value(args, "--project").map(|s| s.to_lowercase());
-    let tag_filter = flag_value(args, "--tag").map(|s| s.to_lowercase());
-    let search_filter = flag_value(args, "--search").map(|s| s.to_lowercase());
-    let limit = flag_value(args, "--limit").and_then(|s| s.parse::<usize>().ok());
-    let pos = positional_args(args, &["--project", "--tag", "--search", "--limit"]);
+async fn cmd_ls(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
+    let include_done = has_any_flag(args, &["--done", "-d"]);
+    let proj_filter = flag_any_value(args, &["--project", "-p"]).map(|s| s.to_lowercase());
+    let tag_filter = flag_any_value(args, &["--tag", "-g"]).map(|s| s.to_lowercase());
+    let search_filter = flag_any_value(args, &["--search", "-s"]).map(|s| s.to_lowercase());
+    let limit = flag_any_value(args, &["--limit", "-l"]).and_then(|s| s.parse::<usize>().ok());
+    let pos = positional_args(
+        args,
+        &[
+            "--project",
+            "-p",
+            "--tag",
+            "-g",
+            "--search",
+            "-s",
+            "--limit",
+            "-l",
+        ],
+    );
     let view = pos.first().map(|s| s.as_str()).unwrap_or("all");
 
     let snap = load_snapshot(true).await;
@@ -346,7 +680,6 @@ async fn cmd_ls(args: &[String]) -> Result<()> {
                         .as_deref()
                         .is_some_and(|d| d < today.as_str())
             }
-            "all" => true,
             _ => true,
         })
         .filter(|t| match (&proj_filter, &proj_id_filter) {
@@ -376,35 +709,91 @@ async fn cmd_ls(args: &[String]) -> Result<()> {
     }
 
     if filtered.is_empty() {
-        println!("No tasks found.");
+        println!(
+            "{}",
+            paint(snap.theme.muted_color(), "No tasks found.", color_on)
+        );
         return Ok(());
     }
 
-    for t in filtered {
-        let check = if t.is_done { "[x]" } else { "[ ]" };
-        let mut meta = Vec::new();
-        if let Some(pid) = &t.project_id
-            && let Some(p) = projects.iter().find(|p| &p.id == pid)
-        {
-            meta.push(format!("+{}", p.title));
-        }
-        for tid in &t.tag_ids {
-            if let Some(tag) = tags.iter().find(|tg| &tg.id == tid) {
-                meta.push(format!("#{}", tag.title));
-            }
-        }
-        if let Some(due) = &t.due_day {
-            meta.push(format!("@{due}"));
-        }
-        if let Some(dl) = &t.deadline_day {
-            meta.push(format!("!{dl}"));
-        }
-        let meta_str = if meta.is_empty() {
-            String::new()
+    let status_dot = if snap.online {
+        paint(snap.theme.success_color(), "● online", color_on)
+    } else {
+        paint(snap.theme.warning_color(), "○ offline", color_on)
+    };
+    println!(
+        "{} {} {}",
+        paint_bold(snap.theme.accent_color(), &format!("╭─ {view}"), color_on),
+        paint(
+            snap.theme.muted_color(),
+            &format!("({} tasks)", filtered.len()),
+            color_on
+        ),
+        status_dot
+    );
+
+    let last_idx = filtered.len() - 1;
+    for (idx, t) in filtered.iter().enumerate() {
+        let is_last = idx == last_idx;
+        let branch = if is_last { "╰─" } else { "├─" };
+        let child_indent = if is_last { "   " } else { "│  " };
+        let is_tracking = snap.cache.current_task_id.as_deref() == Some(t.id.as_str());
+        let icon = if t.is_done {
+            paint(snap.theme.success_color(), "✓", color_on)
+        } else if is_tracking {
+            paint_bold(snap.theme.success_color(), "▶", color_on)
         } else {
-            format!("  {}", meta.join(" "))
+            paint(snap.theme.accent_color(), "○", color_on)
         };
-        println!("{check} {}  ({}){meta_str}", t.title, t.id);
+        let title_str = if t.is_done {
+            paint(snap.theme.muted_color(), &t.title, color_on)
+        } else if is_tracking {
+            paint_bold(snap.theme.success_color(), &t.title, color_on)
+        } else {
+            paint(snap.theme.fg_color(), &t.title, color_on)
+        };
+        let id_str = paint(snap.theme.muted_color(), &format!("({})", t.id), color_on);
+        let meta = format_task_meta(t, &projects, &tags, &today, &snap.theme, color_on);
+
+        println!(
+            "{} {icon} {title_str}  {id_str}{meta}",
+            paint(snap.theme.border_color(), branch, color_on)
+        );
+
+        let subs: Vec<&Task> = snap
+            .cache
+            .tasks
+            .iter()
+            .filter(|st| st.parent_id.as_deref() == Some(t.id.as_str()))
+            .filter(|st| include_done || !st.is_done)
+            .collect();
+        for (s_idx, sub) in subs.iter().enumerate() {
+            let sub_branch = if s_idx + 1 == subs.len() {
+                "╰─"
+            } else {
+                "├─"
+            };
+            let sub_icon = if sub.is_done {
+                paint(snap.theme.success_color(), "✓", color_on)
+            } else {
+                paint(snap.theme.muted_color(), "○", color_on)
+            };
+            let sub_title = paint(
+                if sub.is_done {
+                    snap.theme.muted_color()
+                } else {
+                    snap.theme.fg_color()
+                },
+                &sub.title,
+                color_on,
+            );
+            let sub_id = paint(snap.theme.muted_color(), &format!("({})", sub.id), color_on);
+            println!(
+                "{}{} {sub_icon} {sub_title}  {sub_id}",
+                paint(snap.theme.border_color(), child_indent, color_on),
+                paint(snap.theme.border_color(), sub_branch, color_on)
+            );
+        }
     }
     Ok(())
 }
@@ -415,6 +804,7 @@ async fn apply_patch(
     patch: serde_json::Value,
     json_out: bool,
     human_msg: &str,
+    color_on: bool,
 ) -> Result<()> {
     if snap.online
         && !task_id.starts_with("offline-task-")
@@ -427,7 +817,7 @@ async fn apply_patch(
         if json_out {
             println!("{}", serde_json::to_string_pretty(&updated)?);
         } else {
-            println!("{human_msg}");
+            println!("{}", paint(snap.theme.success_color(), human_msg, color_on));
         }
         return Ok(());
     }
@@ -442,18 +832,25 @@ async fn apply_patch(
             println!("{}", serde_json::to_string_pretty(t)?);
         }
     } else {
-        println!("{human_msg} (queued offline)");
+        println!(
+            "{}",
+            paint(
+                snap.theme.warning_color(),
+                &format!("{human_msg} (queued offline)"),
+                color_on
+            )
+        );
     }
     Ok(())
 }
 
-async fn cmd_done(args: &[String], force_undo: bool) -> Result<()> {
-    let json_out = has_flag(args, "--json");
-    let undo = force_undo || has_flag(args, "--undo");
+async fn cmd_done(args: &[String], force_undo: bool, color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
+    let undo = force_undo || has_any_flag(args, &["--undo", "-u"]);
     let pos = positional_args(args, &[]);
     let query = pos.join(" ").trim().to_string();
     if query.is_empty() {
-        bail!("Usage: spt done <id|query> [--undo] [--json]");
+        bail!("Usage: spt done <id|pattern|query> [-u|--undo] [-j|--json]");
     }
     let mut snap = load_snapshot(true).await;
     let task = resolve_task(&snap.cache.tasks, &query)?.clone();
@@ -461,22 +858,27 @@ async fn cmd_done(args: &[String], force_undo: bool) -> Result<()> {
     if let Some(t) = snap.cache.tasks.iter_mut().find(|t| t.id == task.id) {
         t.is_done = target_done;
     }
-    let verb = if target_done { "Completed" } else { "Reopened" };
+    let verb = if target_done {
+        "✓ Completed"
+    } else {
+        "↺ Reopened"
+    };
     apply_patch(
         &mut snap,
         &task.id,
         json!({ "isDone": target_done }),
         json_out,
         &format!("{verb}: {} ({})", task.title, task.id),
+        color_on,
     )
     .await
 }
 
-async fn cmd_edit(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+async fn cmd_edit(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let pos = positional_args(args, &[]);
     if pos.len() < 2 {
-        bail!("Usage: spt edit <id|query> \"<title + short syntax>\" [--json]");
+        bail!("Usage: spt edit <id|pattern|query> \"<title + short syntax>\" [-j|--json]");
     }
     let query = &pos[0];
     let raw = pos[1..].join(" ").trim().to_string();
@@ -484,7 +886,18 @@ async fn cmd_edit(args: &[String]) -> Result<()> {
     let projects = all_projects(&snap.cache);
     let tags = all_tags(&snap.cache);
     let task = resolve_task(&snap.cache.tasks, query)?.clone();
-    let parsed = parse_short_syntax(&raw, &projects, &tags, None, Vec::new());
+    let (corrected_raw, corrections) = autocorrect_short_syntax(&raw, &projects, &tags);
+    if !json_out && !corrections.is_empty() {
+        println!(
+            "{}",
+            paint(
+                snap.theme.warning_color(),
+                &format!("Auto-corrected: {}", corrections.join(", ")),
+                color_on
+            )
+        );
+    }
+    let parsed = parse_short_syntax(&corrected_raw, &projects, &tags, None, Vec::new());
 
     let mut patch = serde_json::Map::new();
     let final_title = if parsed.title.is_empty() {
@@ -543,7 +956,8 @@ async fn cmd_edit(args: &[String]) -> Result<()> {
         &task.id,
         serde_json::Value::Object(patch),
         json_out,
-        &format!("Updated: {final_title} ({})", task.id),
+        &format!("✎ Updated: {final_title} ({})", task.id),
+        color_on,
     )
     .await
 }
@@ -574,13 +988,13 @@ pub fn parse_schedule_when(when: &str) -> Result<Option<String>> {
     }
 }
 
-async fn cmd_schedule(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
-    let remind = flag_value(args, "--remind");
-    let pos = positional_args(args, &["--remind"]);
+async fn cmd_schedule(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
+    let remind = flag_any_value(args, &["--remind", "-r"]);
+    let pos = positional_args(args, &["--remind", "-r"]);
     if pos.len() < 2 {
         bail!(
-            "Usage: spt schedule <id|query> <today|tomorrow|next-week|YYYY-MM-DD|clear> [--remind HH:MM]"
+            "Usage: spt schedule <id|pattern|query> <today|tomorrow|next-week|YYYY-MM-DD|clear> [-r|--remind HH:MM]"
         );
     }
     let due_day = parse_schedule_when(&pos[1])?;
@@ -615,17 +1029,18 @@ async fn cmd_schedule(args: &[String]) -> Result<()> {
         &task.id,
         patch,
         json_out,
-        &format!("Scheduled '{}' -> {label}", task.title),
+        &format!("📅 Scheduled '{}' -> {label}", task.title),
+        color_on,
     )
     .await
 }
 
-async fn cmd_rm(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+async fn cmd_rm(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let pos = positional_args(args, &[]);
     let query = pos.join(" ").trim().to_string();
     if query.is_empty() {
-        bail!("Usage: spt rm <id|query> [--json]");
+        bail!("Usage: spt rm <id|pattern|query> [-j|--json]");
     }
     let mut snap = load_snapshot(true).await;
     let task = resolve_task(&snap.cache.tasks, &query)?.clone();
@@ -639,7 +1054,16 @@ async fn cmd_rm(args: &[String]) -> Result<()> {
         if json_out {
             println!("{}", json!({ "deleted": task.id }));
         } else {
-            println!("Deleted: {} ({})", task.title, task.id);
+            println!(
+                "{} {} {}",
+                paint_bold(snap.theme.danger_color(), "✗ Deleted", color_on),
+                paint(snap.theme.fg_color(), &task.title, color_on),
+                paint(
+                    snap.theme.muted_color(),
+                    &format!("({})", task.id),
+                    color_on
+                )
+            );
         }
         return Ok(());
     }
@@ -651,17 +1075,26 @@ async fn cmd_rm(args: &[String]) -> Result<()> {
     if json_out {
         println!("{}", json!({ "deleted": task.id, "queued": true }));
     } else {
-        println!("Deleted: {} ({}) (queued offline)", task.title, task.id);
+        println!(
+            "{} {} {} (queued offline)",
+            paint_bold(snap.theme.warning_color(), "✗ Deleted", color_on),
+            paint(snap.theme.fg_color(), &task.title, color_on),
+            paint(
+                snap.theme.muted_color(),
+                &format!("({})", task.id),
+                color_on
+            )
+        );
     }
     Ok(())
 }
 
-async fn cmd_start(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+async fn cmd_start(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let pos = positional_args(args, &[]);
     let query = pos.join(" ").trim().to_string();
     if query.is_empty() {
-        bail!("Usage: spt start <id|query> [--json]");
+        bail!("Usage: spt start <id|pattern|query> [-j|--json]");
     }
     let mut snap = load_snapshot(true).await;
     let task = resolve_task(&snap.cache.tasks, &query)?.clone();
@@ -675,7 +1108,16 @@ async fn cmd_start(args: &[String]) -> Result<()> {
         if json_out {
             println!("{}", json!({ "tracking": task.id, "title": task.title }));
         } else {
-            println!("Started timer: {} ({})", task.title, task.id);
+            println!(
+                "{} {} {}",
+                paint_bold(snap.theme.success_color(), "▶ Tracking", color_on),
+                paint(snap.theme.fg_color(), &task.title, color_on),
+                paint(
+                    snap.theme.muted_color(),
+                    &format!("({})", task.id),
+                    color_on
+                )
+            );
         }
         return Ok(());
     }
@@ -691,15 +1133,21 @@ async fn cmd_start(args: &[String]) -> Result<()> {
         );
     } else {
         println!(
-            "Started timer: {} ({}) (queued offline)",
-            task.title, task.id
+            "{} {} {} (queued offline)",
+            paint_bold(snap.theme.warning_color(), "▶ Tracking", color_on),
+            paint(snap.theme.fg_color(), &task.title, color_on),
+            paint(
+                snap.theme.muted_color(),
+                &format!("({})", task.id),
+                color_on
+            )
         );
     }
     Ok(())
 }
 
-async fn cmd_stop(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+async fn cmd_stop(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let mut snap = load_snapshot(true).await;
     snap.cache.current_task_id = None;
 
@@ -708,7 +1156,14 @@ async fn cmd_stop(args: &[String]) -> Result<()> {
         if json_out {
             println!("{}", json!({ "tracking": null }));
         } else {
-            println!("Stopped active task timer.");
+            println!(
+                "{}",
+                paint(
+                    snap.theme.muted_color(),
+                    "■ Stopped active task timer.",
+                    color_on
+                )
+            );
         }
         return Ok(());
     }
@@ -720,16 +1175,23 @@ async fn cmd_stop(args: &[String]) -> Result<()> {
     if json_out {
         println!("{}", json!({ "tracking": null, "queued": true }));
     } else {
-        println!("Stopped active task timer (queued offline).");
+        println!(
+            "{}",
+            paint(
+                snap.theme.warning_color(),
+                "■ Stopped active task timer (queued offline).",
+                color_on
+            )
+        );
     }
     Ok(())
 }
 
-async fn cmd_log(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+async fn cmd_log(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let pos = positional_args(args, &[]);
     if pos.len() < 2 {
-        bail!("Usage: spt log <id|query> <duration> (e.g. 25m, 1h30m)");
+        bail!("Usage: spt log <id|pattern|query> <duration> (e.g. 25m, 1h30m)");
     }
     let add_ms = parse_duration_ms(&pos[1])
         .ok_or_else(|| anyhow!("Invalid duration '{}'. Use e.g. 25m, 1h30m.", pos[1]))?;
@@ -745,18 +1207,19 @@ async fn cmd_log(args: &[String]) -> Result<()> {
         json!({ "timeSpent": new_spent }),
         json_out,
         &format!(
-            "Logged +{} on '{}' (total {})",
+            "⏱ Logged +{} on '{}' (total {})",
             format_ms(add_ms),
             task.title,
             format_ms(new_spent)
         ),
+        color_on,
     )
     .await
 }
 
-async fn cmd_status(args: &[String]) -> Result<()> {
-    let waybar = has_flag(args, "--waybar");
-    let json_out = has_flag(args, "--json");
+async fn cmd_status(args: &[String], color_on: bool) -> Result<()> {
+    let waybar = has_any_flag(args, &["--waybar", "-w"]);
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let snap = load_snapshot(true).await;
     let today = Local::now().format("%Y-%m-%d").to_string();
 
@@ -822,16 +1285,39 @@ async fn cmd_status(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    let conn_dot = if snap.online { "●" } else { "○ offline" };
+    let conn_dot = if snap.online {
+        paint(snap.theme.success_color(), "●", color_on)
+    } else {
+        paint(snap.theme.warning_color(), "○ offline", color_on)
+    };
     match current {
-        Some(t) => println!("▶ {} | {today_remaining} today | {conn_dot}", t.title),
-        None => println!("{today_remaining} today | {conn_dot}"),
+        Some(t) => println!(
+            "{} | {} | {conn_dot}",
+            paint_bold(
+                snap.theme.success_color(),
+                &format!("▶ {}", t.title),
+                color_on
+            ),
+            paint(
+                snap.theme.accent_color(),
+                &format!("{today_remaining} today"),
+                color_on
+            )
+        ),
+        None => println!(
+            "{} | {conn_dot}",
+            paint(
+                snap.theme.accent_color(),
+                &format!("{today_remaining} today"),
+                color_on
+            )
+        ),
     }
     Ok(())
 }
 
-async fn cmd_current(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+async fn cmd_current(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let snap = load_snapshot(true).await;
     let current = snap
         .cache
@@ -844,10 +1330,14 @@ async fn cmd_current(args: &[String]) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(t)?);
             } else {
                 println!(
-                    "{} ({}) [{}]",
-                    t.title,
-                    t.id,
-                    format_ms(t.time_spent.unwrap_or(0))
+                    "{} {} {}",
+                    paint_bold(snap.theme.success_color(), &t.title, color_on),
+                    paint(snap.theme.muted_color(), &format!("({})", t.id), color_on),
+                    paint(
+                        snap.theme.accent_color(),
+                        &format!("[{}]", format_ms(t.time_spent.unwrap_or(0))),
+                        color_on
+                    )
                 );
             }
             Ok(())
@@ -861,38 +1351,77 @@ async fn cmd_current(args: &[String]) -> Result<()> {
     }
 }
 
-async fn cmd_projects(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+async fn cmd_projects(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let snap = load_snapshot(true).await;
     let projects = all_projects(&snap.cache);
     if json_out {
         println!("{}", serde_json::to_string_pretty(&projects)?);
     } else {
-        for p in projects {
-            println!("{}  ({})", p.title, p.id);
+        println!(
+            "{}",
+            paint_bold(
+                snap.theme.accent_color(),
+                &format!("Projects ({})", projects.len()),
+                color_on
+            )
+        );
+        for (i, p) in projects.iter().enumerate() {
+            let branch = if i + 1 == projects.len() {
+                "╰─"
+            } else {
+                "├─"
+            };
+            let rgb = p.display_color();
+            println!(
+                "{} {} {}",
+                paint(snap.theme.border_color(), branch, color_on),
+                paint_bold(rgb, &p.title, color_on),
+                paint(snap.theme.muted_color(), &format!("({})", p.id), color_on)
+            );
         }
     }
     Ok(())
 }
 
-async fn cmd_tags(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+async fn cmd_tags(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let snap = load_snapshot(true).await;
     let tags = all_tags(&snap.cache);
     if json_out {
         println!("{}", serde_json::to_string_pretty(&tags)?);
     } else {
-        for t in tags {
-            println!("#{}  ({})", t.title, t.id);
+        println!(
+            "{}",
+            paint_bold(
+                snap.theme.accent_color(),
+                &format!("Tags ({})", tags.len()),
+                color_on
+            )
+        );
+        for (i, t) in tags.iter().enumerate() {
+            let branch = if i + 1 == tags.len() {
+                "╰─"
+            } else {
+                "├─"
+            };
+            let rgb = t.display_color();
+            println!(
+                "{} {} {}",
+                paint(snap.theme.border_color(), branch, color_on),
+                paint_bold(rgb, &format!("#{}", t.title), color_on),
+                paint(snap.theme.muted_color(), &format!("({})", t.id), color_on)
+            );
         }
     }
     Ok(())
 }
 
-fn cmd_counter(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+fn cmd_counter(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let pos = positional_args(args, &[]);
     let mut config = AppConfig::load();
+    let theme = config.theme.clone();
     let mut cache = OfflineCache::load();
     let mut counters = if cache.counters.is_empty() {
         config.counters.clone()
@@ -906,7 +1435,12 @@ fn cmd_counter(args: &[String]) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&counters)?);
         } else {
             for c in &counters {
-                println!("{}: {}  ({})", c.title, c.count, c.id);
+                println!(
+                    "{}: {} {}",
+                    paint(theme.fg_color(), &c.title, color_on),
+                    paint_bold(theme.accent_color(), &c.count.to_string(), color_on),
+                    paint(theme.muted_color(), &format!("({})", c.id), color_on)
+                );
             }
         }
         return Ok(());
@@ -943,13 +1477,17 @@ fn cmd_counter(args: &[String]) -> Result<()> {
     if json_out {
         println!("{}", serde_json::to_string_pretty(&updated)?);
     } else {
-        println!("{}: {}", updated.title, updated.count);
+        println!(
+            "{}: {}",
+            paint(theme.fg_color(), &updated.title, color_on),
+            paint_bold(theme.success_color(), &updated.count.to_string(), color_on)
+        );
     }
     Ok(())
 }
 
-async fn cmd_summary(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+async fn cmd_summary(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let snap = load_snapshot(true).await;
     let today = Local::now().format("%Y-%m-%d").to_string();
     let start_of_today = Local::now()
@@ -997,21 +1535,37 @@ async fn cmd_summary(args: &[String]) -> Result<()> {
         );
     } else {
         println!(
-            "Daily Summary ({today}): {} completed, {} unfinished, {} focus time",
-            completed.len(),
-            unfinished.len(),
-            format_ms(focus_ms)
+            "{}",
+            paint_bold(
+                snap.theme.accent_color(),
+                &format!("Daily Summary ({today})"),
+                color_on
+            )
+        );
+        println!(
+            "├─ {} completed  |  {} unfinished  |  {} focus time",
+            paint_bold(
+                snap.theme.success_color(),
+                &completed.len().to_string(),
+                color_on
+            ),
+            paint_bold(
+                snap.theme.warning_color(),
+                &unfinished.len().to_string(),
+                color_on
+            ),
+            paint_bold(snap.theme.accent_color(), &format_ms(focus_ms), color_on)
         );
     }
     Ok(())
 }
 
-async fn cmd_worklog(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
-    let by = flag_value(args, "--by").unwrap_or_else(|| "project".to_string());
-    let days = if has_flag(args, "--month") {
+async fn cmd_worklog(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
+    let by = flag_any_value(args, &["--by", "-b"]).unwrap_or_else(|| "project".to_string());
+    let days = if has_any_flag(args, &["--month", "-m"]) {
         30
-    } else if has_flag(args, "--week") {
+    } else if has_any_flag(args, &["--week", "-w"]) {
         7
     } else {
         1
@@ -1065,17 +1619,42 @@ async fn cmd_worklog(args: &[String]) -> Result<()> {
     if json_out {
         println!("{}", serde_json::to_string_pretty(&rows)?);
     } else if rows.is_empty() {
-        println!("No time logged in this period.");
+        println!(
+            "{}",
+            paint(
+                snap.theme.muted_color(),
+                "No time logged in this period.",
+                color_on
+            )
+        );
     } else {
-        for (name, ms) in rows {
-            println!("{name:<24} {}", format_ms(ms));
+        println!(
+            "{}",
+            paint_bold(
+                snap.theme.accent_color(),
+                &format!("Worklog (by {by})"),
+                color_on
+            )
+        );
+        for (i, (name, ms)) in rows.iter().enumerate() {
+            let branch = if i + 1 == rows.len() {
+                "╰─"
+            } else {
+                "├─"
+            };
+            println!(
+                "{} {:<24} {}",
+                paint(snap.theme.border_color(), branch, color_on),
+                paint(snap.theme.fg_color(), name, color_on),
+                paint_bold(snap.theme.success_color(), &format_ms(*ms), color_on)
+            );
         }
     }
     Ok(())
 }
 
-async fn cmd_sync(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+async fn cmd_sync(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let config = AppConfig::load();
     let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
     let mut cache = OfflineCache::load();
@@ -1165,7 +1744,8 @@ async fn cmd_sync(args: &[String]) -> Result<()> {
         );
     } else {
         println!(
-            "Synced: {} tasks ({replayed} replayed, {} pending)",
+            "{} {} tasks ({replayed} replayed, {} pending)",
+            paint_bold(config.theme.success_color(), "✓ Synced:", color_on),
             cache.tasks.len(),
             cache.pending_ops.len()
         );
@@ -1173,8 +1753,8 @@ async fn cmd_sync(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_doctor(args: &[String]) -> Result<()> {
-    let json_out = has_flag(args, "--json");
+async fn cmd_doctor(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
     let config = AppConfig::load();
     let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
     let cache = OfflineCache::load();
@@ -1202,23 +1782,42 @@ async fn cmd_doctor(args: &[String]) -> Result<()> {
         );
     } else {
         println!(
-            "API ({}): {}",
-            config.api_url,
-            if api_ok { "OK" } else { "OFFLINE" }
+            "{}",
+            paint_bold(config.theme.accent_color(), "spt doctor", color_on)
         );
         println!(
-            "Bridge (127.0.0.1:{}): {}",
-            config.bridge_port,
-            if bridge_ok {
-                "LISTENING"
+            "├─ API ({}): {}",
+            config.api_url,
+            if api_ok {
+                paint_bold(config.theme.success_color(), "OK", color_on)
             } else {
-                "NOT RUNNING"
+                paint_bold(config.theme.danger_color(), "OFFLINE", color_on)
             }
         );
-        println!("Config: {}", AppConfig::config_path().display());
         println!(
-            "Cache:  {} ({} tasks, {} pending ops)",
-            OfflineCache::cache_path().display(),
+            "├─ Bridge (127.0.0.1:{}): {}",
+            config.bridge_port,
+            if bridge_ok {
+                paint_bold(config.theme.success_color(), "LISTENING", color_on)
+            } else {
+                paint(config.theme.warning_color(), "NOT RUNNING", color_on)
+            }
+        );
+        println!(
+            "├─ Config: {}",
+            paint(
+                config.theme.muted_color(),
+                &AppConfig::config_path().display().to_string(),
+                color_on
+            )
+        );
+        println!(
+            "╰─ Cache:  {} ({} tasks, {} pending ops)",
+            paint(
+                config.theme.muted_color(),
+                &OfflineCache::cache_path().display().to_string(),
+                color_on
+            ),
             cache.tasks.len(),
             cache.pending_ops.len()
         );
@@ -1250,15 +1849,50 @@ mod tests {
     }
 
     #[test]
-    fn resolves_task_by_id_prefix_or_title() {
+    fn resolves_task_by_id_dot_patterns_and_title() {
         let tasks = vec![
-            sample_task("abc123", "Write docs"),
-            sample_task("def456", "Fix login bug"),
+            sample_task("G2P4Yuklt0bNZdtJPMk_g", "Write docs"),
+            sample_task("def456xyz", "Fix login bug"),
         ];
-        assert_eq!(resolve_task(&tasks, "abc123").unwrap().id, "abc123");
-        assert_eq!(resolve_task(&tasks, "def").unwrap().id, "def456");
-        assert_eq!(resolve_task(&tasks, "login").unwrap().id, "def456");
-        assert!(resolve_task(&tasks, "missing").is_err());
+        assert_eq!(
+            resolve_task(&tasks, "G2.").unwrap().id,
+            "G2P4Yuklt0bNZdtJPMk_g"
+        );
+        assert_eq!(
+            resolve_task(&tasks, "._g").unwrap().id,
+            "G2P4Yuklt0bNZdtJPMk_g"
+        );
+        assert_eq!(
+            resolve_task(&tasks, "G2.k_g").unwrap().id,
+            "G2P4Yuklt0bNZdtJPMk_g"
+        );
+        assert_eq!(
+            resolve_task(&tasks, ".Yuk.").unwrap().id,
+            "G2P4Yuklt0bNZdtJPMk_g"
+        );
+        assert_eq!(resolve_task(&tasks, "def").unwrap().id, "def456xyz");
+        assert_eq!(resolve_task(&tasks, "login").unwrap().id, "def456xyz");
+        assert!(resolve_task(&tasks, "G2.zzz").is_err());
+    }
+
+    #[test]
+    fn autocorrects_typos_in_tags_projects_and_dates() {
+        let projects = vec![Project {
+            id: "p1".into(),
+            title: "Work".into(),
+            theme: None,
+            color: None,
+        }];
+        let tags = vec![Tag {
+            id: "t1".into(),
+            title: "priority".into(),
+            color: None,
+            theme: None,
+        }];
+        let (fixed, notes) =
+            autocorrect_short_syntax("quite #prioriyt +Wrok @tomorow !todqy", &projects, &tags);
+        assert_eq!(fixed, "quite #priority +Work @tomorrow !today");
+        assert_eq!(notes.len(), 4);
     }
 
     #[test]
@@ -1275,13 +1909,13 @@ mod tests {
     }
 
     #[test]
-    fn positional_args_skips_value_flags() {
-        let args: Vec<String> = vec!["add", "--top", "--note", "hello", "Buy", "milk", "--json"]
+    fn positional_args_skips_short_and_long_value_flags() {
+        let args: Vec<String> = vec!["add", "-t", "-n", "hello", "Buy", "milk", "-j"]
             .into_iter()
             .map(String::from)
             .collect();
         assert_eq!(
-            positional_args(&args[1..], &["--note", "--parent"]),
+            positional_args(&args[1..], &["--note", "-n", "--parent", "-P"]),
             vec!["Buy", "milk"]
         );
     }

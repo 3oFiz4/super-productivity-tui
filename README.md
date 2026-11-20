@@ -210,19 +210,19 @@ When typing a task **Title**, you can embed inline tokens (with floating autocom
 
 ## CLI Subcommands
 
-Run `spt <command>` for non-interactive scripting, cron jobs, and status bars (all commands support `--json` and fall back to the offline cache/queue when SP is closed):
+Run `spt <command>` for non-interactive scripting, cron jobs, and status bars (supports theme colors, tree-formatted lists, short flags like `-t`/`-p`/`-j`, typo auto-correction for `#tag`/`+project`/`@due`/`!deadline`, and SQL-like dot IDs like `G2.` or `._g`):
 
 ```bash
-spt add "Ship release +Work #urgent t30m/1h @today !friday"
-spt ls today --project Work
-spt done "Ship release"
-spt schedule "Ship release" tomorrow --remind 09:30
+spt add "Ship release +Work #prioriyt t30m/1h @today !friday" -t   # auto-fixes #prioriyt -> #priority
+spt ls today -p Work
+spt done G2.                                                       # matches ID starting with G2
+spt schedule ._g tomorrow -r 09:30                                 # matches ID ending with _g
 spt start "Ship release" && spt stop
 spt log "Ship release" 25m
-spt status --waybar        # JSON for Waybar / Polybar
-spt status --tmux          # Compact line for tmux / prompt
+spt status -w              # JSON for Waybar / Polybar (--waybar)
+spt status -T              # Compact line for tmux / prompt (--tmux)
 spt counter inc Water
-spt summary && spt worklog --week --by project
+spt summary && spt worklog -w -b project
 spt sync && spt doctor
 ```
 
