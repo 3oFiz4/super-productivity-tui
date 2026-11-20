@@ -134,6 +134,17 @@ ORRRRRR just go to release and install it already as ready-to-use `.exe` :3:
 5. Copy your `Access Token`
 6. Done :3.... don't leak it though.
 
+#### Companion Plugin (Create / Edit / Delete Projects & Tags)
+
+Super Productivity's Local REST API only exposes read-only `GET /projects` and `GET /tags`, so `spt` includes a lightweight companion plugin bridge (`127.0.0.1:3877`) that uses SP's internal `PluginAPI` to create, rename, recolor, and delete Projects and Tags directly inside Super Productivity:
+
+1. Open Super Productivity and go to **Settings → Plugins**.
+2. Click **Upload Plugin** and select [`plugin/sp-tui-bridge.zip`](plugin/sp-tui-bridge.zip).
+3. Enable **Super Productivity TUI Bridge**.
+4. In `spt`, press `:s` to confirm `SP Plugin: ● Active` (and optionally adjust **Bridge Port**, default `3877`, `0` to disable).
+
+> **Note:** Even without the plugin installed, Projects and Tags created/edited in `spt` are saved locally in `cache.json` and persist across syncs and restarts.
+
 ---
 
 ## Keybind Quick Reference

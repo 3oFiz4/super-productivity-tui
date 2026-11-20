@@ -441,6 +441,7 @@ pub enum SettingsField {
     ApiToken,
     KeybindMode,
     HintKeybind,
+    BridgePort,
 }
 
 impl SettingsField {
@@ -449,16 +450,18 @@ impl SettingsField {
             Self::ApiUrl => Self::ApiToken,
             Self::ApiToken => Self::KeybindMode,
             Self::KeybindMode => Self::HintKeybind,
-            Self::HintKeybind => Self::ApiUrl,
+            Self::HintKeybind => Self::BridgePort,
+            Self::BridgePort => Self::ApiUrl,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::ApiUrl => Self::HintKeybind,
+            Self::ApiUrl => Self::BridgePort,
             Self::ApiToken => Self::ApiUrl,
             Self::KeybindMode => Self::ApiToken,
             Self::HintKeybind => Self::KeybindMode,
+            Self::BridgePort => Self::HintKeybind,
         }
     }
 }
@@ -469,6 +472,7 @@ pub struct SettingsState {
     pub api_token: String,
     pub keybind_mode: KeybindMode,
     pub hint_keybind: bool,
+    pub bridge_port: String,
     pub active_field: SettingsField,
 }
 
@@ -479,6 +483,7 @@ impl From<&AppConfig> for SettingsState {
             api_token: cfg.api_token.clone(),
             keybind_mode: cfg.keybind_mode,
             hint_keybind: cfg.hint_keybind,
+            bridge_port: cfg.bridge_port.to_string(),
             active_field: SettingsField::ApiUrl,
         }
     }
@@ -3068,6 +3073,9 @@ impl App {
                 self.config.api_token = self.settings_state.api_token.clone();
                 self.config.keybind_mode = self.settings_state.keybind_mode;
                 self.config.hint_keybind = self.settings_state.hint_keybind;
+                if let Ok(port) = self.settings_state.bridge_port.trim().parse::<u16>() {
+                    self.config.bridge_port = port;
+                }
                 let _ = self.config.save();
                 self.client
                     .update_credentials(&self.config.api_url, &self.config.api_token);
@@ -3083,6 +3091,7 @@ impl App {
                 }
                 SettingsField::ApiUrl => self.settings_state.api_url.push(' '),
                 SettingsField::ApiToken => self.settings_state.api_token.push(' '),
+                SettingsField::BridgePort => {}
             },
             KeyCode::Backspace => match self.settings_state.active_field {
                 SettingsField::ApiUrl => {
@@ -3091,11 +3100,18 @@ impl App {
                 SettingsField::ApiToken => {
                     self.settings_state.api_token.pop();
                 }
+                SettingsField::BridgePort => {
+                    self.settings_state.bridge_port.pop();
+                }
                 _ => {}
             },
             KeyCode::Char(c) => match self.settings_state.active_field {
                 SettingsField::ApiUrl => self.settings_state.api_url.push(c),
                 SettingsField::ApiToken => self.settings_state.api_token.push(c),
+                SettingsField::BridgePort if c.is_ascii_digit() => {
+                    self.settings_state.bridge_port.push(c);
+                }
+                SettingsField::BridgePort => {}
                 SettingsField::KeybindMode => {
                     self.settings_state.keybind_mode = self.settings_state.keybind_mode.next();
                 }
