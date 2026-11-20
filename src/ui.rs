@@ -932,6 +932,27 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
                 field_style(SettingsField::HintKeybind),
             ),
         ]),
+        Line::from(vec![
+            Span::raw("Bridge Port:   "),
+            Span::styled(
+                format!("{} (0 = off)", st.bridge_port),
+                field_style(SettingsField::BridgePort),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("SP Plugin:     "),
+            if app.bridge.is_plugin_active() {
+                Span::styled(
+                    "\u{25cf} Active",
+                    Style::default().fg(app.config.theme.success_color()),
+                )
+            } else {
+                Span::styled(
+                    "\u{25cb} Waiting (upload plugin/sp-tui-bridge.zip in SP)",
+                    Style::default().fg(app.config.theme.muted_color()),
+                )
+            },
+        ]),
         Line::from(""),
         Line::from(Span::styled(
             "Tab/Up/Down: move | Space: toggle | Enter: save & connect | Esc: cancel",

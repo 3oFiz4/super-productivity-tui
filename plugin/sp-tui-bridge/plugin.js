@@ -38,9 +38,10 @@
         return cmd.id;
       }
       case 'delete_project': {
-        if (typeof PluginAPI.deleteProject === 'function') {
-          await PluginAPI.deleteProject(cmd.id);
+        if (typeof PluginAPI.deleteProject !== 'function') {
+          throw new Error('SP PluginAPI.deleteProject is unavailable in this SP version');
         }
+        await PluginAPI.deleteProject(cmd.id);
         return cmd.id;
       }
       case 'create_tag': {
@@ -58,9 +59,10 @@
         return cmd.id;
       }
       case 'delete_tag': {
-        if (typeof PluginAPI.deleteTag === 'function') {
-          await PluginAPI.deleteTag(cmd.id);
+        if (typeof PluginAPI.deleteTag !== 'function') {
+          throw new Error('SP PluginAPI does not expose deleteTag (delete tag in SP UI)');
         }
+        await PluginAPI.deleteTag(cmd.id);
         return cmd.id;
       }
       default:

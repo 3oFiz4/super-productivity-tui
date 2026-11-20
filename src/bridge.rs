@@ -198,3 +198,68 @@ async fn write_http_response(
     );
     stream.write_all(resp.as_bytes()).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bridge_serves_commands_and_processes_ack() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bridge = BridgeHandle::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<ApiEvent>();
+
+        let b_srv = bridge.clone();
+        let t_srv = tx.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((stream, _)) = listener.accept().await {
+                    let b = b_srv.clone();
+                    let t = t_srv.clone();
+                    tokio::spawn(async move {
+                        handle_conn(stream, b, t).await;
+                    });
+                }
+            }
+        });
+
+        bridge.enqueue(BridgeAction::CreateProject {
+            local_id: "local-proj-1".into(),
+            title: "Bridge Test".into(),
+            color: "#89b4fa".into(),
+        });
+
+        let client = reqwest::Client::new();
+        let cmds: Vec<BridgeCommand> = client
+            .get(format!("http://{addr}/commands"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert!(bridge.is_plugin_active());
+
+        let ack_resp = client
+            .post(format!("http://{addr}/commands/ack"))
+            .json(&serde_json::json!({
+                "cmd_id": cmds[0].cmd_id,
+                "ok": true,
+                "entity_id": "sp-proj-999"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(ack_resp.status().is_success());
+
+        match rx.recv().await {
+            Some(ApiEvent::BridgeAcked { cmd, ack }) => {
+                assert_eq!(cmd.cmd_id, cmds[0].cmd_id);
+                assert_eq!(ack.entity_id.as_deref(), Some("sp-proj-999"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+}

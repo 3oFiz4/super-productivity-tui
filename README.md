@@ -14,9 +14,6 @@ https://github.com/user-attachments/assets/220b082d-f626-4e31-a14c-3818a0de2199
 
 </details>
 
-
-
-
 A blazing fast vim-supported terminal client for **Super Productivity (SP)**, made in Rust (ratatui) and connected to Super Productivity's Local REST API.
 
 Freely manage your tasks, subtasks, projects, tags, deadlines, focus sessions, daily habits, worklogs, and terminal colorschemes without having to open super-productivity EVER... i mean it.
@@ -82,7 +79,7 @@ Ranked from most prioritized to less. Want to suggest a feature? Create a Issue,
 
 ## Bugs
 
-1. `HTTP POST` for Project and Tag creation is not possible right now, fallback to local creation instead.
+1. [RESOLVED] `HTTP POST` for Project and Tag creation is not possible right now, fallback to local creation instead. (#fdeeb79)
 
 ---
 
@@ -133,6 +130,17 @@ ORRRRRR just go to release and install it already as ready-to-use `.exe` :3:
 4. Enable `Enable local REST API`
 5. Copy your `Access Token`
 6. Done :3.... don't leak it though.
+
+#### Companion Plugin (Create / Edit / Delete Projects & Tags)
+
+Super Productivity's Local REST API only exposes read-only `GET /projects` and `GET /tags`, so `spt` includes a lightweight companion plugin bridge (`127.0.0.1:3877`) that uses SP's internal `PluginAPI` to create, rename, recolor, and delete Projects and Tags directly inside Super Productivity:
+
+1. Open Super Productivity and go to **Settings → Plugins**.
+2. Click **Upload Plugin** and select [`plugin/sp-tui-bridge.zip`](plugin/sp-tui-bridge.zip).
+3. Enable **Super Productivity TUI Bridge**.
+4. In `spt`, press `:s` to confirm `SP Plugin: ● Active` (and optionally adjust **Bridge Port**, default `3877`, `0` to disable).
+
+> **Note:** Even without the plugin installed, Projects and Tags created/edited in `spt` are saved locally in `cache.json` and persist across syncs and restarts.
 
 ---
 

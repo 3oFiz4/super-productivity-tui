@@ -441,6 +441,7 @@ pub enum SettingsField {
     ApiToken,
     KeybindMode,
     HintKeybind,
+    BridgePort,
 }
 
 impl SettingsField {
@@ -449,16 +450,18 @@ impl SettingsField {
             Self::ApiUrl => Self::ApiToken,
             Self::ApiToken => Self::KeybindMode,
             Self::KeybindMode => Self::HintKeybind,
-            Self::HintKeybind => Self::ApiUrl,
+            Self::HintKeybind => Self::BridgePort,
+            Self::BridgePort => Self::ApiUrl,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::ApiUrl => Self::HintKeybind,
+            Self::ApiUrl => Self::BridgePort,
             Self::ApiToken => Self::ApiUrl,
             Self::KeybindMode => Self::ApiToken,
             Self::HintKeybind => Self::KeybindMode,
+            Self::BridgePort => Self::HintKeybind,
         }
     }
 }
@@ -469,6 +472,7 @@ pub struct SettingsState {
     pub api_token: String,
     pub keybind_mode: KeybindMode,
     pub hint_keybind: bool,
+    pub bridge_port: String,
     pub active_field: SettingsField,
 }
 
@@ -479,6 +483,7 @@ impl From<&AppConfig> for SettingsState {
             api_token: cfg.api_token.clone(),
             keybind_mode: cfg.keybind_mode,
             hint_keybind: cfg.hint_keybind,
+            bridge_port: cfg.bridge_port.to_string(),
             active_field: SettingsField::ApiUrl,
         }
     }
@@ -1908,7 +1913,7 @@ impl App {
                 'O' | 'L' if mode.is_nvim_active() => self.open_properties(),
                 'i' if mode.is_nvim_active() => self.start_rename_selected_task(),
                 'a' => self.handle_add_shortcut(),
-                'd' => self.delete_selected_task(),
+                'd' => self.handle_delete_shortcut(),
                 'n' if mode.is_normal_active() => self.show_note = !self.show_note,
                 'K' if mode.is_nvim_active() => self.show_note = !self.show_note,
                 'u' => self.undo(),
@@ -2209,6 +2214,91 @@ impl App {
             self.rename_buffer = task.title;
             self.jk_tracker = JkEscapeTracker::default();
         }
+    }
+
+    fn handle_delete_shortcut(&mut self) {
+        if self.focus == FocusSection::Nav
+            && let Some(row) = self.all_nav_rows().get(self.nav_selected).cloned()
+        {
+            match row.kind {
+                NavItemKind::Filter(NavFilter::Project(pid)) => {
+                    self.delete_project_by_id(pid);
+                    return;
+                }
+                NavItemKind::Filter(NavFilter::Tag(tid)) => {
+                    self.delete_tag_by_id(tid);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.delete_selected_task();
+    }
+
+    fn delete_project_by_id(&mut self, pid: String) {
+        if pid == "INBOX_PROJECT" {
+            self.status_message = "Cannot delete Inbox project".to_string();
+            return;
+        }
+        self.projects.retain(|p| p.id != pid);
+        self.offline_cache.local_projects.retain(|p| p.id != pid);
+        self.save_cache();
+        self.clamp_selections();
+        if !pid.starts_with("local-proj-") {
+            self.bridge
+                .enqueue(BridgeAction::DeleteProject { id: pid.clone() });
+        }
+        let client = self.client.clone();
+        let tx = self.api_tx.clone();
+        let plugin_active = self.bridge.is_plugin_active();
+        tokio::spawn(async move {
+            match client.delete_project(&pid).await {
+                Ok(()) => {
+                    let _ = tx.send(ApiEvent::ProjectDeleted(pid));
+                }
+                Err(_) if plugin_active => {
+                    let _ = tx.send(ApiEvent::Error(
+                        "Project delete queued via SP bridge".to_string(),
+                    ));
+                }
+                Err(_) => {
+                    let _ = tx.send(ApiEvent::Error(
+                        "Deleted locally (install sp-tui-bridge plugin to sync)".to_string(),
+                    ));
+                }
+            }
+        });
+    }
+
+    fn delete_tag_by_id(&mut self, tid: String) {
+        self.tags.retain(|t| t.id != tid);
+        self.offline_cache.local_tags.retain(|t| t.id != tid);
+        self.save_cache();
+        self.clamp_selections();
+        if !tid.starts_with("local-tag-") {
+            self.bridge
+                .enqueue(BridgeAction::DeleteTag { id: tid.clone() });
+        }
+        let client = self.client.clone();
+        let tx = self.api_tx.clone();
+        let plugin_active = self.bridge.is_plugin_active();
+        tokio::spawn(async move {
+            match client.delete_tag(&tid).await {
+                Ok(()) => {
+                    let _ = tx.send(ApiEvent::TagDeleted(tid));
+                }
+                Err(_) if plugin_active => {
+                    let _ = tx.send(ApiEvent::Error(
+                        "Tag delete queued via SP bridge".to_string(),
+                    ));
+                }
+                Err(_) => {
+                    let _ = tx.send(ApiEvent::Error(
+                        "Deleted locally (install sp-tui-bridge plugin to sync)".to_string(),
+                    ));
+                }
+            }
+        });
     }
 
     fn delete_selected_task(&mut self) {
@@ -2648,34 +2738,7 @@ impl App {
                 }
                 'd' => {
                     self.active_modal = ActiveModal::None;
-                    self.projects.retain(|p| p.id != pid);
-                    self.offline_cache.local_projects.retain(|p| p.id != pid);
-                    self.save_cache();
-                    if !pid.starts_with("local-proj-") {
-                        self.bridge
-                            .enqueue(BridgeAction::DeleteProject { id: pid.clone() });
-                    }
-                    let client = self.client.clone();
-                    let tx = self.api_tx.clone();
-                    let plugin_active = self.bridge.is_plugin_active();
-                    tokio::spawn(async move {
-                        match client.delete_project(&pid).await {
-                            Ok(()) => {
-                                let _ = tx.send(ApiEvent::ProjectDeleted(pid));
-                            }
-                            Err(_) if plugin_active => {
-                                let _ = tx.send(ApiEvent::Error(
-                                    "Project delete queued via SP bridge".to_string(),
-                                ));
-                            }
-                            Err(_) => {
-                                let _ = tx.send(ApiEvent::Error(
-                                    "Deleted locally (install sp-tui-bridge plugin to sync)"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                    });
+                    self.delete_project_by_id(pid);
                 }
                 _ => {}
             },
@@ -2716,34 +2779,7 @@ impl App {
                 }
                 'd' => {
                     self.active_modal = ActiveModal::None;
-                    self.tags.retain(|t| t.id != tid);
-                    self.offline_cache.local_tags.retain(|t| t.id != tid);
-                    self.save_cache();
-                    if !tid.starts_with("local-tag-") {
-                        self.bridge
-                            .enqueue(BridgeAction::DeleteTag { id: tid.clone() });
-                    }
-                    let client = self.client.clone();
-                    let tx = self.api_tx.clone();
-                    let plugin_active = self.bridge.is_plugin_active();
-                    tokio::spawn(async move {
-                        match client.delete_tag(&tid).await {
-                            Ok(()) => {
-                                let _ = tx.send(ApiEvent::TagDeleted(tid));
-                            }
-                            Err(_) if plugin_active => {
-                                let _ = tx.send(ApiEvent::Error(
-                                    "Tag delete queued via SP bridge".to_string(),
-                                ));
-                            }
-                            Err(_) => {
-                                let _ = tx.send(ApiEvent::Error(
-                                    "Deleted locally (install sp-tui-bridge plugin to sync)"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                    });
+                    self.delete_tag_by_id(tid);
                 }
                 _ => {}
             },
@@ -3068,6 +3104,9 @@ impl App {
                 self.config.api_token = self.settings_state.api_token.clone();
                 self.config.keybind_mode = self.settings_state.keybind_mode;
                 self.config.hint_keybind = self.settings_state.hint_keybind;
+                if let Ok(port) = self.settings_state.bridge_port.trim().parse::<u16>() {
+                    self.config.bridge_port = port;
+                }
                 let _ = self.config.save();
                 self.client
                     .update_credentials(&self.config.api_url, &self.config.api_token);
@@ -3083,6 +3122,7 @@ impl App {
                 }
                 SettingsField::ApiUrl => self.settings_state.api_url.push(' '),
                 SettingsField::ApiToken => self.settings_state.api_token.push(' '),
+                SettingsField::BridgePort => {}
             },
             KeyCode::Backspace => match self.settings_state.active_field {
                 SettingsField::ApiUrl => {
@@ -3091,11 +3131,18 @@ impl App {
                 SettingsField::ApiToken => {
                     self.settings_state.api_token.pop();
                 }
+                SettingsField::BridgePort => {
+                    self.settings_state.bridge_port.pop();
+                }
                 _ => {}
             },
             KeyCode::Char(c) => match self.settings_state.active_field {
                 SettingsField::ApiUrl => self.settings_state.api_url.push(c),
                 SettingsField::ApiToken => self.settings_state.api_token.push(c),
+                SettingsField::BridgePort if c.is_ascii_digit() => {
+                    self.settings_state.bridge_port.push(c);
+                }
+                SettingsField::BridgePort => {}
                 SettingsField::KeybindMode => {
                     self.settings_state.keybind_mode = self.settings_state.keybind_mode.next();
                 }
