@@ -449,6 +449,8 @@ pub enum SettingsField {
     KeybindMode,
     HintKeybind,
     BridgePort,
+    DesktopNotifications,
+    SoundAlerts,
 }
 
 impl SettingsField {
@@ -458,17 +460,21 @@ impl SettingsField {
             Self::ApiToken => Self::KeybindMode,
             Self::KeybindMode => Self::HintKeybind,
             Self::HintKeybind => Self::BridgePort,
-            Self::BridgePort => Self::ApiUrl,
+            Self::BridgePort => Self::DesktopNotifications,
+            Self::DesktopNotifications => Self::SoundAlerts,
+            Self::SoundAlerts => Self::ApiUrl,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::ApiUrl => Self::BridgePort,
+            Self::ApiUrl => Self::SoundAlerts,
             Self::ApiToken => Self::ApiUrl,
             Self::KeybindMode => Self::ApiToken,
             Self::HintKeybind => Self::KeybindMode,
             Self::BridgePort => Self::HintKeybind,
+            Self::DesktopNotifications => Self::BridgePort,
+            Self::SoundAlerts => Self::DesktopNotifications,
         }
     }
 }
@@ -480,6 +486,8 @@ pub struct SettingsState {
     pub keybind_mode: KeybindMode,
     pub hint_keybind: bool,
     pub bridge_port: String,
+    pub desktop_notifications: bool,
+    pub sound_alerts: bool,
     pub active_field: SettingsField,
 }
 
@@ -491,6 +499,8 @@ impl From<&AppConfig> for SettingsState {
             keybind_mode: cfg.keybind_mode,
             hint_keybind: cfg.hint_keybind,
             bridge_port: cfg.bridge_port.to_string(),
+            desktop_notifications: cfg.desktop_notifications,
+            sound_alerts: cfg.sound_alerts,
             active_field: SettingsField::ApiUrl,
         }
     }
@@ -801,6 +811,8 @@ pub struct App {
 
     pub undo_stack: Vec<UndoOp>,
     pub redo_stack: Vec<UndoOp>,
+    pub notified_reminders: HashSet<String>,
+    pub notified_due_dates: HashSet<String>,
 
     pub areas: UiAreas,
     pub api_tx: mpsc::UnboundedSender<ApiEvent>,
@@ -898,6 +910,8 @@ impl App {
             theme_editor: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            notified_reminders: HashSet::new(),
+            notified_due_dates: HashSet::new(),
             areas: UiAreas::default(),
             api_tx,
         }
@@ -1149,6 +1163,8 @@ impl App {
                     self.timer_started_at = current_task_id.as_ref().map(|_| Instant::now());
                     self.current_task_id = current_task_id;
                     self.save_cache();
+                    self.check_due_and_deadline_notifications();
+                    self.check_scheduled_reminders();
                 }
                 if !message.is_empty() {
                     self.status_message = message;
@@ -1554,7 +1570,15 @@ impl App {
         if self.rename_target.is_some() && self.jk_tracker.poll_expired() {
             self.rename_buffer.push('j');
         }
-        if self.active_modal == ActiveModal::Properties {
+        if self.nav_search_active && self.jk_tracker.poll_expired() {
+            self.nav_search_query.push('j');
+            self.jump_nav_match(true, true);
+        }
+        if self.search_active && self.jk_tracker.poll_expired() {
+            self.search_query.push('j');
+            self.clamp_selections();
+        }
+        if self.active_modal != ActiveModal::None || self.visual_mode {
             self.prop_jk_tracker.poll_expired();
         }
         if self.sequence.pending.is_none()
@@ -1583,13 +1607,16 @@ impl App {
                         FocusMode::Countdown => {
                             self.pomodoro.completed_sessions += 1;
                             self.pomodoro.remaining_secs = self.pomodoro.countdown_mins * 60;
-                            self.pomodoro.reminder = Some("Countdown finished!".to_string());
+                            let msg = "Countdown finished!".to_string();
+                            self.pomodoro.reminder = Some(msg.clone());
+                            self.send_alert("Focus Timer", &msg);
                         }
                         FocusMode::Flowtime => {
                             self.pomodoro.phase = PomodoroPhase::Focus;
                             self.pomodoro.elapsed_secs = 0;
-                            self.pomodoro.reminder =
-                                Some("Flowtime break finished! Ready to focus.".to_string());
+                            let msg = "Flowtime break finished! Ready to focus.".to_string();
+                            self.pomodoro.reminder = Some(msg.clone());
+                            self.send_alert("Focus Timer", &msg);
                         }
                         FocusMode::Pomodoro => match self.pomodoro.phase {
                             PomodoroPhase::Focus => {
@@ -1602,18 +1629,21 @@ impl App {
                                     };
                                 self.pomodoro.phase = next_phase;
                                 self.pomodoro.remaining_secs = next_phase.duration_secs();
-                                self.pomodoro.reminder = Some(format!(
+                                let msg = format!(
                                     "Focus complete! Time for a {} ({}m).",
                                     next_phase.label(),
                                     next_phase.duration_secs() / 60
-                                ));
+                                );
+                                self.pomodoro.reminder = Some(msg.clone());
+                                self.send_alert("Focus Timer", &msg);
                             }
                             PomodoroPhase::ShortBreak | PomodoroPhase::LongBreak => {
                                 self.pomodoro.phase = PomodoroPhase::Focus;
                                 self.pomodoro.remaining_secs = PomodoroPhase::Focus.duration_secs();
-                                self.pomodoro.reminder = Some(
-                                    "Break finished! Ready for next Focus session.".to_string(),
-                                );
+                                let msg =
+                                    "Break finished! Ready for next Focus session.".to_string();
+                                self.pomodoro.reminder = Some(msg.clone());
+                                self.send_alert("Focus Timer", &msg);
                             }
                         },
                     }
@@ -1644,6 +1674,89 @@ impl App {
             && self.last_sync_at.elapsed() >= Duration::from_secs(30)
         {
             self.sync_with_replay();
+        }
+
+        self.check_scheduled_reminders();
+        self.check_due_and_deadline_notifications();
+    }
+
+    fn send_alert(&self, title: &str, body: &str) {
+        crate::notify::dispatch(
+            self.config.desktop_notifications,
+            self.config.sound_alerts,
+            title,
+            body,
+        );
+    }
+
+    pub fn check_scheduled_reminders(&mut self) {
+        let now_ms = Local::now().timestamp_millis().max(0) as u64;
+        let mut due_reminders = Vec::new();
+        for t in &self.tasks {
+            if !t.is_done
+                && let Some(ms) = t.remind_at
+                && ms <= now_ms
+                && now_ms.saturating_sub(ms) <= 86_400_000
+                && !self.notified_reminders.contains(&t.id)
+            {
+                due_reminders.push((t.id.clone(), t.title.clone()));
+            }
+        }
+        for (id, title) in due_reminders {
+            self.notified_reminders.insert(id);
+            self.status_message = format!("Reminder: {title}");
+            self.send_alert("Scheduled Reminder", &title);
+        }
+    }
+
+    pub fn check_due_and_deadline_notifications(&mut self) {
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let mut deadline_titles = Vec::new();
+        let mut due_titles = Vec::new();
+
+        for t in &self.tasks {
+            if t.is_done {
+                continue;
+            }
+            if let Some(dl) = t.deadline_day.as_deref()
+                && dl <= today.as_str()
+            {
+                let key = format!("{}:deadline:{}", t.id, today);
+                if self.notified_due_dates.insert(key) {
+                    deadline_titles.push(t.title.clone());
+                }
+            }
+            if t.due_day.as_deref() == Some(today.as_str()) {
+                let key = format!("{}:due:{}", t.id, today);
+                if self.notified_due_dates.insert(key) {
+                    due_titles.push(t.title.clone());
+                }
+            }
+        }
+
+        if !deadline_titles.is_empty() {
+            let body = if deadline_titles.len() == 1 {
+                deadline_titles[0].clone()
+            } else {
+                format!(
+                    "{} tasks due/overdue ({})",
+                    deadline_titles.len(),
+                    deadline_titles[0]
+                )
+            };
+            self.send_alert("Deadline Alert", &body);
+        }
+        if !due_titles.is_empty() {
+            let body = if due_titles.len() == 1 {
+                due_titles[0].clone()
+            } else {
+                format!(
+                    "{} tasks scheduled today ({})",
+                    due_titles.len(),
+                    due_titles[0]
+                )
+            };
+            self.send_alert("Due Today", &body);
         }
     }
 
@@ -1706,7 +1819,8 @@ impl App {
                 if matches!(
                     key.code,
                     KeyCode::Esc | KeyCode::Char('N') | KeyCode::Char('q')
-                ) {
+                ) || (matches!(key.code, KeyCode::Char(c) if self.prop_jk_tracker.on_char(c) == JkResult::Escaped))
+                {
                     self.active_modal = ActiveModal::None;
                 }
                 return;
@@ -1741,20 +1855,43 @@ impl App {
         if self.nav_search_active {
             match key.code {
                 KeyCode::Esc => {
+                    self.jk_tracker = JkEscapeTracker::default();
                     self.nav_search_active = false;
                     self.nav_search_query.clear();
                 }
                 KeyCode::Enter => {
+                    if self.jk_tracker.take_pending() {
+                        self.nav_search_query.push('j');
+                        self.jump_nav_match(true, true);
+                    }
                     self.nav_search_active = false;
                 }
                 KeyCode::Backspace => {
-                    self.nav_search_query.pop();
+                    if !self.jk_tracker.take_pending() {
+                        self.nav_search_query.pop();
+                    }
                     self.jump_nav_match(true, true);
                 }
-                KeyCode::Char(c) => {
-                    self.nav_search_query.push(c);
-                    self.jump_nav_match(true, true);
-                }
+                KeyCode::Char(c) => match self.jk_tracker.on_char(c) {
+                    JkResult::HoldJ => {}
+                    JkResult::Escaped => {
+                        self.nav_search_active = false;
+                        self.nav_search_query.clear();
+                    }
+                    JkResult::FlushJAndHoldNewJ => {
+                        self.nav_search_query.push('j');
+                        self.jump_nav_match(true, true);
+                    }
+                    JkResult::FlushJAndChar(ch) => {
+                        self.nav_search_query.push('j');
+                        self.nav_search_query.push(ch);
+                        self.jump_nav_match(true, true);
+                    }
+                    JkResult::Char(ch) => {
+                        self.nav_search_query.push(ch);
+                        self.jump_nav_match(true, true);
+                    }
+                },
                 _ => {}
             }
             return;
@@ -1763,21 +1900,45 @@ impl App {
         if self.search_active {
             match key.code {
                 KeyCode::Esc => {
+                    self.jk_tracker = JkEscapeTracker::default();
                     self.search_active = false;
                     self.search_query.clear();
                     self.clamp_selections();
                 }
                 KeyCode::Enter => {
+                    if self.jk_tracker.take_pending() {
+                        self.search_query.push('j');
+                        self.clamp_selections();
+                    }
                     self.search_active = false;
                 }
                 KeyCode::Backspace => {
-                    self.search_query.pop();
+                    if !self.jk_tracker.take_pending() {
+                        self.search_query.pop();
+                    }
                     self.clamp_selections();
                 }
-                KeyCode::Char(c) => {
-                    self.search_query.push(c);
-                    self.clamp_selections();
-                }
+                KeyCode::Char(c) => match self.jk_tracker.on_char(c) {
+                    JkResult::HoldJ => {}
+                    JkResult::Escaped => {
+                        self.search_active = false;
+                        self.search_query.clear();
+                        self.clamp_selections();
+                    }
+                    JkResult::FlushJAndHoldNewJ => {
+                        self.search_query.push('j');
+                        self.clamp_selections();
+                    }
+                    JkResult::FlushJAndChar(ch) => {
+                        self.search_query.push('j');
+                        self.search_query.push(ch);
+                        self.clamp_selections();
+                    }
+                    JkResult::Char(ch) => {
+                        self.search_query.push(ch);
+                        self.clamp_selections();
+                    }
+                },
                 _ => {}
             }
             return;
@@ -1797,6 +1958,13 @@ impl App {
         }
 
         if key.code == KeyCode::Esc && self.visual_mode {
+            self.exit_visual_mode();
+            return;
+        }
+        if self.visual_mode
+            && let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
             self.exit_visual_mode();
             return;
         }
@@ -2453,6 +2621,12 @@ impl App {
     }
 
     fn handle_daily_summary_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
+            self.active_modal = ActiveModal::None;
+            return;
+        }
         let unfinished_ids: Vec<String> = self
             .daily_summary_lists()
             .1
@@ -2902,6 +3076,7 @@ impl App {
                 tag_ids: payload.tag_ids.clone(),
                 due_day: payload.due_day.clone(),
                 deadline_day: payload.deadline_day.clone(),
+                remind_at: None,
                 done_on: None,
                 time_estimate: payload.time_estimate,
                 time_spent: payload.time_spent,
@@ -2954,6 +3129,7 @@ impl App {
                         tag_ids: payload.tag_ids.clone(),
                         due_day: payload.due_day.clone(),
                         deadline_day: payload.deadline_day.clone(),
+                        remind_at: None,
                         done_on: None,
                         time_estimate: payload.time_estimate,
                         time_spent: payload.time_spent,
@@ -3504,6 +3680,17 @@ impl App {
     }
 
     fn handle_help_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
+            if self.help_search_focused {
+                self.help_search.pop();
+                self.help_search_focused = false;
+            } else {
+                self.active_modal = ActiveModal::None;
+            }
+            return;
+        }
         if self.help_search_focused {
             match key.code {
                 KeyCode::Esc | KeyCode::Enter => {
@@ -3544,6 +3731,21 @@ impl App {
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
+            match self.settings_state.active_field {
+                SettingsField::ApiUrl => {
+                    self.settings_state.api_url.pop();
+                }
+                SettingsField::ApiToken => {
+                    self.settings_state.api_token.pop();
+                }
+                _ => {}
+            }
+            self.active_modal = ActiveModal::None;
+            return;
+        }
         match key.code {
             KeyCode::Esc => self.active_modal = ActiveModal::None,
             KeyCode::Tab | KeyCode::Down => {
@@ -3557,6 +3759,8 @@ impl App {
                 self.config.api_token = self.settings_state.api_token.clone();
                 self.config.keybind_mode = self.settings_state.keybind_mode;
                 self.config.hint_keybind = self.settings_state.hint_keybind;
+                self.config.desktop_notifications = self.settings_state.desktop_notifications;
+                self.config.sound_alerts = self.settings_state.sound_alerts;
                 if let Ok(port) = self.settings_state.bridge_port.trim().parse::<u16>() {
                     self.config.bridge_port = port;
                 }
@@ -3572,6 +3776,13 @@ impl App {
                 }
                 SettingsField::HintKeybind => {
                     self.settings_state.hint_keybind = !self.settings_state.hint_keybind;
+                }
+                SettingsField::DesktopNotifications => {
+                    self.settings_state.desktop_notifications =
+                        !self.settings_state.desktop_notifications;
+                }
+                SettingsField::SoundAlerts => {
+                    self.settings_state.sound_alerts = !self.settings_state.sound_alerts;
                 }
                 SettingsField::ApiUrl => self.settings_state.api_url.push(' '),
                 SettingsField::ApiToken => self.settings_state.api_token.push(' '),
@@ -3601,6 +3812,13 @@ impl App {
                 }
                 SettingsField::HintKeybind => {
                     self.settings_state.hint_keybind = !self.settings_state.hint_keybind;
+                }
+                SettingsField::DesktopNotifications => {
+                    self.settings_state.desktop_notifications =
+                        !self.settings_state.desktop_notifications;
+                }
+                SettingsField::SoundAlerts => {
+                    self.settings_state.sound_alerts = !self.settings_state.sound_alerts;
                 }
             },
             _ => {}
@@ -3735,6 +3953,18 @@ impl App {
     }
 
     fn handle_add_task_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
+            if self.add_task_state.active_field == AddTaskField::Title {
+                self.add_task_state.title.pop();
+            } else if self.add_task_state.active_field == AddTaskField::Note {
+                self.add_task_state.note.pop();
+            }
+            self.add_task_state.completion = None;
+            self.active_modal = ActiveModal::None;
+            return;
+        }
         if let Some(ref mut comp) = self.add_task_state.completion {
             match key.code {
                 KeyCode::Esc => {
@@ -3899,6 +4129,15 @@ impl App {
     }
 
     fn handle_theme_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
+            if let Some(ed) = self.theme_editor.take() {
+                self.config.theme = ed.original;
+            }
+            self.active_modal = ActiveModal::None;
+            return;
+        }
         let Some(ref mut ed) = self.theme_editor else {
             self.active_modal = ActiveModal::None;
             return;
@@ -4093,6 +4332,17 @@ impl App {
     }
 
     fn handle_add_entity_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
+            if self.add_entity_state.active_field == AddEntityField::Name {
+                self.add_entity_state.title.pop();
+            } else {
+                self.add_entity_state.color.pop();
+            }
+            self.active_modal = ActiveModal::None;
+            return;
+        }
         const PRESET_COLORS: [&str; 6] = [
             "#89b4fa", "#a6e3a1", "#f9e2af", "#f38ba8", "#cba6f7", "#94e2d5",
         ];
@@ -4257,6 +4507,12 @@ impl App {
     }
 
     fn handle_history_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
+            self.active_modal = ActiveModal::None;
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('H') => {
                 self.active_modal = ActiveModal::None;
@@ -4316,6 +4572,16 @@ impl App {
     }
 
     fn handle_counters_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
+            if self.counters_state.adding.is_some() {
+                self.counters_state.adding = None;
+            } else {
+                self.active_modal = ActiveModal::None;
+            }
+            return;
+        }
         if let Some(ref mut title) = self.counters_state.adding {
             match key.code {
                 KeyCode::Esc => {
@@ -4406,6 +4672,12 @@ impl App {
     }
 
     fn handle_pomodoro_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
+            self.active_modal = ActiveModal::None;
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('P') => {
                 self.active_modal = ActiveModal::None;
@@ -4510,6 +4782,13 @@ impl App {
     }
 
     fn handle_reschedule_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
+            self.reschedule_state = None;
+            self.active_modal = ActiveModal::None;
+            return;
+        }
         let Some(ref mut rs) = self.reschedule_state else {
             self.active_modal = ActiveModal::None;
             return;
@@ -4545,12 +4824,14 @@ impl App {
             if let Some(t) = self.tasks.iter_mut().find(|t| t.id == tid) {
                 let prev_due = t.due_day.clone();
                 t.due_day = Some(date_str.clone());
+                t.remind_at = remind_at.map(|ms| ms.max(0) as u64);
                 self.push_undo(UndoOp::ScheduleTask {
                     id: tid.clone(),
                     prev_due,
                     new_due: Some(date_str.clone()),
                 });
             }
+            self.notified_reminders.remove(&tid);
             if let Some(ms) = remind_at {
                 self.spawn_patch(tid, json!({ "dueDay": date_str, "remindAt": ms }));
             } else {
@@ -4648,6 +4929,7 @@ mod tests {
             tag_ids: vec![],
             due_day: None,
             deadline_day: None,
+            remind_at: None,
             done_on: None,
             time_estimate: None,
             time_spent: None,
@@ -4723,6 +5005,7 @@ mod tests {
             tag_ids: vec![],
             due_day: None,
             deadline_day: None,
+            remind_at: None,
             done_on: None,
             time_estimate: None,
             time_spent: None,
@@ -4892,6 +5175,7 @@ mod tests {
             tag_ids: vec![],
             due_day: Some(today.clone()),
             deadline_day: None,
+            remind_at: None,
             done_on: None,
             time_estimate: None,
             time_spent: Some(1_800_000),
@@ -4907,6 +5191,7 @@ mod tests {
             tag_ids: vec![],
             due_day: Some(today.clone()),
             deadline_day: None,
+            remind_at: None,
             done_on: None,
             time_estimate: None,
             time_spent: Some(600_000),
@@ -4947,6 +5232,7 @@ mod tests {
                 tag_ids: vec![],
                 due_day: Some(today.clone()),
                 deadline_day: None,
+                remind_at: None,
                 done_on: None,
                 time_estimate: None,
                 time_spent: None,
@@ -4987,5 +5273,109 @@ mod tests {
         assert!(!app.visual_mode);
         assert_eq!(app.tasks[1].project_id.as_deref(), Some("p1"));
         assert_eq!(app.tasks[2].project_id.as_deref(), Some("p1"));
+    }
+
+    #[test]
+    fn jk_escapes_visual_mode_nav_search_and_daily_summary() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        for i in 1..=2 {
+            app.tasks.push(Task {
+                id: format!("t{i}"),
+                title: format!("Task {i}"),
+                is_done: false,
+                notes: None,
+                project_id: None,
+                parent_id: None,
+                tag_ids: vec![],
+                due_day: Some(today.clone()),
+                deadline_day: None,
+                remind_at: None,
+                done_on: None,
+                time_estimate: None,
+                time_spent: None,
+                repeat_cfg_id: None,
+            });
+        }
+        app.focus = FocusSection::Main;
+        app.handle_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT));
+        assert!(app.visual_mode);
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert!(!app.visual_mode);
+
+        // Nav search jk
+        app.focus = FocusSection::Nav;
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.nav_search_active);
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert!(!app.nav_search_active);
+
+        // DailySummary jk
+        app.handle_key(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT));
+        assert_eq!(app.active_modal, ActiveModal::DailySummary);
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.active_modal, ActiveModal::None);
+    }
+
+    #[test]
+    fn due_deadline_and_reminder_notifications_fire_once() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let now_ms = Local::now().timestamp_millis().max(0) as u64;
+        app.tasks.push(Task {
+            id: "n1".into(),
+            title: "Submit report".into(),
+            is_done: false,
+            notes: None,
+            project_id: None,
+            parent_id: None,
+            tag_ids: vec![],
+            due_day: Some(today.clone()),
+            deadline_day: Some(today.clone()),
+            remind_at: Some(now_ms.saturating_sub(1_000)),
+            done_on: None,
+            time_estimate: None,
+            time_spent: None,
+            repeat_cfg_id: None,
+        });
+
+        app.check_due_and_deadline_notifications();
+        app.check_scheduled_reminders();
+        assert!(app.notified_due_dates.contains(&format!("n1:due:{today}")));
+        assert!(
+            app.notified_due_dates
+                .contains(&format!("n1:deadline:{today}"))
+        );
+        assert!(app.notified_reminders.contains("n1"));
+        assert_eq!(app.status_message, "Reminder: Submit report");
+
+        // Second pass does not overwrite or duplicate
+        app.status_message.clear();
+        app.check_scheduled_reminders();
+        assert!(app.status_message.is_empty());
+    }
+
+    #[test]
+    fn settings_toggles_desktop_notifications_and_sound_alerts() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        assert!(app.config.desktop_notifications);
+        assert!(app.config.sound_alerts);
+
+        app.settings_state = SettingsState::from(&app.config);
+        app.active_modal = ActiveModal::Settings;
+        app.settings_state.active_field = SettingsField::DesktopNotifications;
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!app.settings_state.desktop_notifications);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.settings_state.active_field, SettingsField::SoundAlerts);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!app.settings_state.sound_alerts);
     }
 }

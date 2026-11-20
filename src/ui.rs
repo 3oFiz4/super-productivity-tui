@@ -951,7 +951,7 @@ fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(64, 14, area);
+    let popup = centered_rect(64, 16, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -1017,6 +1017,24 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 format!("{} (0 = off)", st.bridge_port),
                 field_style(SettingsField::BridgePort),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("Desktop Notif: "),
+            Span::styled(
+                if st.desktop_notifications {
+                    "true"
+                } else {
+                    "false"
+                },
+                field_style(SettingsField::DesktopNotifications),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("Sound Alerts:  "),
+            Span::styled(
+                if st.sound_alerts { "true" } else { "false" },
+                field_style(SettingsField::SoundAlerts),
             ),
         ]),
         Line::from(vec![

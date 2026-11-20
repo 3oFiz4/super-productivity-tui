@@ -4,6 +4,7 @@ mod bridge;
 mod config;
 mod keybinds;
 mod models;
+mod notify;
 mod offline;
 mod short_syntax;
 mod theme;

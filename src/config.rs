@@ -54,10 +54,18 @@ pub struct AppConfig {
     pub counters: Vec<SimpleCounter>,
     #[serde(default = "default_bridge_port")]
     pub bridge_port: u16,
+    #[serde(default = "default_true")]
+    pub desktop_notifications: bool,
+    #[serde(default = "default_true")]
+    pub sound_alerts: bool,
 }
 
 fn default_bridge_port() -> u16 {
     3877
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -84,6 +92,8 @@ impl Default for AppConfig {
                 },
             ],
             bridge_port: default_bridge_port(),
+            desktop_notifications: true,
+            sound_alerts: true,
         }
     }
 }

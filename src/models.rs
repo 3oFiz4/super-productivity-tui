@@ -21,6 +21,8 @@ pub struct Task {
     #[serde(default)]
     pub deadline_day: Option<String>,
     #[serde(default)]
+    pub remind_at: Option<u64>,
+    #[serde(default)]
     pub done_on: Option<u64>,
     #[serde(default)]
     pub time_estimate: Option<u64>,
