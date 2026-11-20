@@ -312,6 +312,7 @@ impl AddEntityState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PropertiesTarget {
     Task(String),
+    Batch(Vec<String>),
     Project(String),
     Tag(String),
 }
@@ -765,6 +766,9 @@ pub struct App {
     pub search_query: String,
     pub nav_search_active: bool,
     pub nav_search_query: String,
+    pub visual_mode: bool,
+    pub visual_anchor: Option<usize>,
+    pub selected_task_ids: HashSet<String>,
     pub rename_target: Option<RenameTarget>,
     pub rename_buffer: String,
     pub jk_tracker: JkEscapeTracker,
@@ -862,6 +866,9 @@ impl App {
             search_query: String::new(),
             nav_search_active: false,
             nav_search_query: String::new(),
+            visual_mode: false,
+            visual_anchor: None,
+            selected_task_ids: HashSet::new(),
             rename_target: None,
             rename_buffer: String::new(),
             jk_tracker: JkEscapeTracker::default(),
@@ -1789,6 +1796,11 @@ impl App {
             return;
         }
 
+        if key.code == KeyCode::Esc && self.visual_mode {
+            self.exit_visual_mode();
+            return;
+        }
+
         if key.code == KeyCode::Tab && mode.is_normal_active() {
             self.sequence.clear();
             self.toggle_focus();
@@ -1945,6 +1957,7 @@ impl App {
                 'G' => self.move_to_bottom(),
                 'j' if mode.is_nvim_active() => self.move_down(),
                 'k' if mode.is_nvim_active() => self.move_up(),
+                ' ' => self.activate_selected(),
                 'o' if mode.is_nvim_active() => self.activate_selected(),
                 'l' if mode.is_nvim_active() => self.activate_selected(),
                 't' => self.toggle_timer(),
@@ -1965,6 +1978,8 @@ impl App {
                         self.active_modal = ActiveModal::FullNote;
                     }
                 }
+                'v' if self.focus == FocusSection::Main => self.toggle_visual_select(false),
+                'V' if self.focus == FocusSection::Main => self.toggle_visual_select(true),
                 'p' if mode.is_normal_active() => self.open_properties(),
                 'O' | 'L' if mode.is_nvim_active() => self.open_properties(),
                 'i' if mode.is_nvim_active() => self.start_rename_selected_task(),
@@ -2056,6 +2071,7 @@ impl App {
             FocusSection::Main => {
                 if self.task_selected > 0 {
                     self.task_selected -= 1;
+                    self.sync_visual_range();
                 }
             }
         }
@@ -2073,6 +2089,7 @@ impl App {
                 let len = self.visible_task_rows().len();
                 if self.task_selected + 1 < len {
                     self.task_selected += 1;
+                    self.sync_visual_range();
                 }
             }
         }
@@ -2084,6 +2101,7 @@ impl App {
             FocusSection::Main => {
                 self.task_selected = 0;
                 self.task_scroll = 0;
+                self.sync_visual_range();
             }
         }
     }
@@ -2095,8 +2113,112 @@ impl App {
             }
             FocusSection::Main => {
                 self.task_selected = self.visible_task_rows().len().saturating_sub(1);
+                self.sync_visual_range();
             }
         }
+    }
+
+    fn toggle_visual_select(&mut self, range_mode: bool) {
+        let (is_empty, selected_id) = {
+            let rows = self.visible_task_rows();
+            (
+                rows.is_empty(),
+                rows.get(self.task_selected).map(|(t, _)| t.id.clone()),
+            )
+        };
+        if is_empty {
+            return;
+        }
+        if range_mode {
+            self.visual_mode = true;
+            self.visual_anchor = Some(self.task_selected);
+            self.sync_visual_range();
+            return;
+        }
+        if !self.visual_mode {
+            self.visual_mode = true;
+            self.visual_anchor = None;
+            self.selected_task_ids.clear();
+            if let Some(id) = selected_id {
+                self.selected_task_ids.insert(id);
+            }
+        } else {
+            self.visual_anchor = None;
+            if let Some(id) = selected_id
+                && !self.selected_task_ids.remove(&id)
+            {
+                self.selected_task_ids.insert(id);
+            }
+        }
+    }
+
+    fn sync_visual_range(&mut self) {
+        if !self.visual_mode {
+            return;
+        }
+        let Some(anchor) = self.visual_anchor else {
+            return;
+        };
+        let range_ids: Vec<String> = {
+            let rows = self.visible_task_rows();
+            if rows.is_empty() {
+                return;
+            }
+            let lo = anchor.min(self.task_selected);
+            let hi = anchor.max(self.task_selected).min(rows.len() - 1);
+            rows[lo..=hi].iter().map(|(t, _)| t.id.clone()).collect()
+        };
+        self.selected_task_ids.clear();
+        for id in range_ids {
+            self.selected_task_ids.insert(id);
+        }
+    }
+
+    pub fn exit_visual_mode(&mut self) {
+        self.visual_mode = false;
+        self.visual_anchor = None;
+        self.selected_task_ids.clear();
+    }
+
+    fn batch_toggle_done(&mut self, ids: &[String]) {
+        let target_done = ids.iter().any(|id| {
+            self.tasks
+                .iter()
+                .find(|t| &t.id == id)
+                .is_some_and(|t| !t.is_done)
+        });
+        for id in ids {
+            let prev_done = self.tasks.iter().find(|t| &t.id == id).map(|t| t.is_done);
+            if let Some(prev) = prev_done
+                && prev != target_done
+            {
+                if let Some(t) = self.tasks.iter_mut().find(|t| &t.id == id) {
+                    t.is_done = target_done;
+                }
+                self.push_undo(UndoOp::ToggleDone {
+                    id: id.clone(),
+                    prev_done: prev,
+                });
+                self.spawn_patch(id.clone(), json!({ "isDone": target_done }));
+            }
+        }
+        self.status_message = format!(
+            "{} {} task(s)",
+            if target_done { "Completed" } else { "Reopened" },
+            ids.len()
+        );
+    }
+
+    fn batch_delete(&mut self, ids: &[String]) {
+        for id in ids {
+            if let Some(idx) = self.tasks.iter().position(|t| &t.id == id) {
+                let task = self.tasks.remove(idx);
+                self.push_undo(UndoOp::DeleteTask { task, index: idx });
+                self.spawn_delete(id.clone());
+            }
+        }
+        self.clamp_selections();
+        self.status_message = format!("Deleted {} task(s)", ids.len());
     }
 
     fn toggle_subtasks(&mut self) {
@@ -2185,6 +2307,12 @@ impl App {
                 }
             }
             FocusSection::Main => {
+                if self.visual_mode && !self.selected_task_ids.is_empty() {
+                    let ids: Vec<String> = self.selected_task_ids.iter().cloned().collect();
+                    self.batch_toggle_done(&ids);
+                    self.exit_visual_mode();
+                    return;
+                }
                 if let Some(task) = self.selected_task().cloned() {
                     let next_done = !task.is_done;
                     self.push_undo(UndoOp::ToggleDone {
@@ -2229,6 +2357,18 @@ impl App {
         self.properties_mode = PropertiesMode::Menu;
         match self.focus {
             FocusSection::Main => {
+                if self.visual_mode && !self.selected_task_ids.is_empty() {
+                    let ids: Vec<String> = self.selected_task_ids.iter().cloned().collect();
+                    self.properties_target = Some(PropertiesTarget::Batch(ids));
+                    self.properties_anchor = self
+                        .areas
+                        .task_rows
+                        .iter()
+                        .find(|(_, idx)| *idx == self.task_selected)
+                        .map(|(r, _)| (r.x + 2, r.y + 1));
+                    self.active_modal = ActiveModal::Properties;
+                    return;
+                }
                 if let Some(t) = self.selected_task() {
                     self.properties_target = Some(PropertiesTarget::Task(t.id.clone()));
                     self.properties_anchor = self
@@ -2423,6 +2563,15 @@ impl App {
     }
 
     fn handle_delete_shortcut(&mut self) {
+        if self.focus == FocusSection::Main
+            && self.visual_mode
+            && !self.selected_task_ids.is_empty()
+        {
+            let ids: Vec<String> = self.selected_task_ids.iter().cloned().collect();
+            self.batch_delete(&ids);
+            self.exit_visual_mode();
+            return;
+        }
         if self.focus == FocusSection::Nav
             && let Some(row) = self.all_nav_rows().get(self.nav_selected).cloned()
         {
@@ -2866,17 +3015,39 @@ impl App {
                     } else {
                         self.projects.get(sel - 1).map(|p| p.id.clone())
                     };
-                    if let Some(PropertiesTarget::Task(tid)) = self.properties_target.clone()
-                        && let Some(t) = self.tasks.iter_mut().find(|t| t.id == tid)
-                    {
-                        let prev = t.project_id.clone();
-                        t.project_id = target_pid.clone();
-                        self.push_undo(UndoOp::MoveProject {
-                            id: tid.clone(),
-                            prev_project: prev,
-                            new_project: target_pid.clone(),
-                        });
-                        self.spawn_patch(tid, json!({ "projectId": target_pid }));
+                    match self.properties_target.clone() {
+                        Some(PropertiesTarget::Task(tid)) => {
+                            if let Some(t) = self.tasks.iter_mut().find(|t| t.id == tid) {
+                                let prev = t.project_id.clone();
+                                t.project_id = target_pid.clone();
+                                self.push_undo(UndoOp::MoveProject {
+                                    id: tid.clone(),
+                                    prev_project: prev,
+                                    new_project: target_pid.clone(),
+                                });
+                                self.spawn_patch(tid, json!({ "projectId": target_pid }));
+                            }
+                        }
+                        Some(PropertiesTarget::Batch(ids)) => {
+                            for tid in &ids {
+                                if let Some(t) = self.tasks.iter_mut().find(|t| &t.id == tid) {
+                                    let prev = t.project_id.clone();
+                                    t.project_id = target_pid.clone();
+                                    self.push_undo(UndoOp::MoveProject {
+                                        id: tid.clone(),
+                                        prev_project: prev,
+                                        new_project: target_pid.clone(),
+                                    });
+                                    self.spawn_patch(
+                                        tid.clone(),
+                                        json!({ "projectId": target_pid }),
+                                    );
+                                }
+                            }
+                            self.status_message = format!("Moved {} task(s) to project", ids.len());
+                            self.exit_visual_mode();
+                        }
+                        _ => {}
                     }
                     self.active_modal = ActiveModal::None;
                 }
@@ -2989,6 +3160,82 @@ impl App {
                 }
                 _ => {}
             },
+            PropertiesTarget::Batch(ids) => {
+                if let Some((first, second)) = self.prop_sequence.push(ch) {
+                    match (first, second) {
+                        ('s', 'd') => {
+                            self.prop_sequence.clear();
+                            let today = Local::now().format("%Y-%m-%d").to_string();
+                            for tid in &ids {
+                                self.schedule_task(tid, Some(today.clone()));
+                            }
+                            self.status_message =
+                                format!("Scheduled {} task(s) for Today", ids.len());
+                            self.exit_visual_mode();
+                            self.active_modal = ActiveModal::None;
+                            return;
+                        }
+                        ('s', 'm') => {
+                            self.prop_sequence.clear();
+                            let tomorrow = (Local::now() + ChronoDuration::days(1))
+                                .format("%Y-%m-%d")
+                                .to_string();
+                            for tid in &ids {
+                                self.schedule_task(tid, Some(tomorrow.clone()));
+                            }
+                            self.status_message =
+                                format!("Scheduled {} task(s) for Tomorrow", ids.len());
+                            self.exit_visual_mode();
+                            self.active_modal = ActiveModal::None;
+                            return;
+                        }
+                        ('s', 'n') => {
+                            self.prop_sequence.clear();
+                            let next_week = (Local::now() + ChronoDuration::days(7))
+                                .format("%Y-%m-%d")
+                                .to_string();
+                            for tid in &ids {
+                                self.schedule_task(tid, Some(next_week.clone()));
+                            }
+                            self.status_message =
+                                format!("Scheduled {} task(s) for Next Week", ids.len());
+                            self.exit_visual_mode();
+                            self.active_modal = ActiveModal::None;
+                            return;
+                        }
+                        ('m', 'p') => {
+                            self.prop_sequence.clear();
+                            self.properties_mode = PropertiesMode::MoveToProject { selected: 0 };
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                if matches!(ch, 's' | 'm') {
+                    return;
+                }
+                match ch {
+                    'u' => {
+                        for tid in &ids {
+                            self.schedule_task(tid, None);
+                        }
+                        self.status_message = format!("Unscheduled {} task(s)", ids.len());
+                        self.exit_visual_mode();
+                        self.active_modal = ActiveModal::None;
+                    }
+                    'c' => {
+                        self.batch_toggle_done(&ids);
+                        self.exit_visual_mode();
+                        self.active_modal = ActiveModal::None;
+                    }
+                    'd' => {
+                        self.batch_delete(&ids);
+                        self.exit_visual_mode();
+                        self.active_modal = ActiveModal::None;
+                    }
+                    _ => {}
+                }
+            }
             PropertiesTarget::Task(tid) => {
                 if let Some((first, second)) = self.prop_sequence.push(ch) {
                     match (first, second) {
@@ -4676,5 +4923,69 @@ mod tests {
         assert_eq!(app.active_modal, ActiveModal::DailySummary);
         app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
         assert_eq!(app.tasks[1].due_day.as_deref(), Some(tomorrow.as_str()));
+    }
+
+    #[test]
+    fn visual_mode_selects_range_and_batch_completes_and_moves_project() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        app.projects.push(Project {
+            id: "p1".into(),
+            title: "Work".into(),
+            theme: None,
+            color: None,
+        });
+        for i in 1..=3 {
+            app.tasks.push(Task {
+                id: format!("t{i}"),
+                title: format!("Task {i}"),
+                is_done: false,
+                notes: None,
+                project_id: None,
+                parent_id: None,
+                tag_ids: vec![],
+                due_day: Some(today.clone()),
+                deadline_day: None,
+                done_on: None,
+                time_estimate: None,
+                time_spent: None,
+                repeat_cfg_id: None,
+            });
+        }
+        app.focus = FocusSection::Main;
+
+        // V starts range visual mode at t1, j selects t1..=t2
+        app.handle_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT));
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(app.visual_mode);
+        assert_eq!(app.selected_task_ids.len(), 2);
+
+        // Space batch-completes t1 and t2 and exits visual mode
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!app.visual_mode);
+        assert!(app.tasks[0].is_done);
+        assert!(app.tasks[1].is_done);
+        assert!(!app.tasks[2].is_done);
+
+        // v toggles t2 and t3 individually, then O -> mp -> Down -> Enter moves both to p1
+        app.task_selected = 1;
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(app.selected_task_ids.len(), 2);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT));
+        assert!(matches!(
+            app.properties_target,
+            Some(PropertiesTarget::Batch(_))
+        ));
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.visual_mode);
+        assert_eq!(app.tasks[1].project_id.as_deref(), Some("p1"));
+        assert_eq!(app.tasks[2].project_id.as_deref(), Some("p1"));
     }
 }

@@ -385,12 +385,23 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
         task_rows.push((row_rect, idx));
 
         let is_selected = app.focus == FocusSection::Main && app.task_selected == idx;
+        let is_multi_selected = app.visual_mode && app.selected_task_ids.contains(&task.id);
         let is_renaming = matches!(
             &app.rename_target,
             Some(crate::app::RenameTarget::Task(id)) if id == &task.id
         );
 
-        let checkbox = if task.is_done { "\u{f046}" } else { "\u{f096}" };
+        let checkbox = if is_multi_selected {
+            if task.is_done {
+                "\u{25aa}\u{f046}"
+            } else {
+                "\u{25aa}\u{f096}"
+            }
+        } else if task.is_done {
+            "\u{f046}"
+        } else {
+            "\u{f096}"
+        };
 
         if *is_subtask {
             let mut sub_style = Style::default().fg(app.config.theme.muted_color());
@@ -507,8 +518,11 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
                 .fg(app.config.theme.muted_color())
                 .add_modifier(Modifier::CROSSED_OUT);
         }
-        if is_selected {
+        if is_selected || is_multi_selected {
             row_style = row_style.bg(app.config.theme.selection_bg_color());
+        }
+        if is_multi_selected {
+            row_style = row_style.fg(app.config.theme.accent_color());
         }
         if is_renaming {
             row_style = Style::default()
@@ -580,6 +594,16 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let mut spans = Vec::new();
+    if app.visual_mode {
+        spans.push(Span::styled(
+            format!(" [VISUAL ({} selected)] ", app.selected_task_ids.len()),
+            Style::default()
+                .fg(Color::Black)
+                .bg(app.config.theme.accent_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     if app.rename_target.is_some() {
         spans.push(Span::styled(
             " [INSERT (jk/Enter to save)] ",
@@ -749,6 +773,30 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(""),
                 Line::from(Span::styled(
                     "Esc to close",
+                    Style::default().fg(app.config.theme.muted_color()),
+                )),
+            ],
+        ),
+        Some(PropertiesTarget::Batch(ids)) => (
+            " Batch Properties ",
+            vec![
+                Line::from(Span::styled(
+                    format!("{} task(s) selected", ids.len()),
+                    Style::default()
+                        .fg(app.config.theme.accent_color())
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(hint_spans("complete / toggle", hint, base, hc)),
+                Line::from(hint_indices("schedule today", hint, &[0, 11], base, hc)),
+                Line::from(hint_indices("schedule tommorow", hint, &[0, 11], base, hc)),
+                Line::from(hint_spans("schedule next week", hint, base, hc)),
+                Line::from(hint_spans("unschedule", hint, base, hc)),
+                Line::from(hint_indices("move to project", hint, &[0, 8], base, hc)),
+                Line::from(hint_spans("delete", hint, base, hc)),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Type underlined shortcut | Esc or jk to close",
                     Style::default().fg(app.config.theme.muted_color()),
                 )),
             ],
