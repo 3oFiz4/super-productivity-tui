@@ -22,27 +22,27 @@ Freely manage your tasks, subtasks, projects, tags, deadlines, focus sessions, d
 
 ## Features
 
-- **Views & Organization**: `Inbox`, `Today`, `Planned`, `History`, `Counters`, `Projects`, and `Tags` literally in a small collapsible navigation sidebar (`Space` / `Enter` / `l`).
+- **Views & Organization**: `Inbox`, `Today`, `Planned`, `History`, `Counters`, `Projects`, and `Tags` literally in a small collapsible navigation sidebar (`Space` / `Enter` / `l` / `o`), plus sidebar `/` fuzzy finder (`n` / `N`).
 - **Flexible Keybinds (`Both`, `NVIM`, `Normal`)**:
   - Incase you're not familiar with vim (which is sad but is ok), there's an alternative!
-  - `hjkl` and arrow movement, `gg` / `G` jump to top/bottom, live `/` fuzzy task search.
-  - Neovim-style `:` command palette (`:c` colorscheme, `:h` help, `:s` settings, `:p` focus timer, `:hist` worklog, `:cnt` counters, `:q` quit).
-  - Vim-like pending command display in the status bar and `jk` alternative to `Esc` in modals/dropdowns.
+  - `hjkl` and arrow movement, `gg` / `G` jump to top/bottom, live `/` fuzzy task/sidebar search, and `v` / `V` Visual multi-select mode.
+  - Neovim-style `:` command palette (`:c` colorscheme, `:h` help, `:s` settings, `:p` focus timer, `:w` worklog, `:n` counters, `:r` daily summary, `:q` quit).
+  - Vim-like pending command display in the status bar and `jk` alternative to `Esc` in modals, dropdowns, Visual mode, and sidebar search.
 - **Short Syntax Task Creation (`a`)**:
   - Just type `+project`, `#tag`, `t1h5m3s` (or `t30m/1h`), `@tomorrow` / `@2026-12-01`, and `!friday` directly in the task title with floating live completion.
   - It also pre-selects the currently viewed project automatically :-).
 - **Inline Subtasks & Markdown Notes**:
-  - Expand/collapse subtasks directly under parent tasks (`Tab` or `>`), navigate into subtasks with `hjkl`, toggle completion checkboxes (`Space`), and view Markdown-styled notes (full view with `Shift+N`).
-- **Context-Aware Properties Dropdown (`o` / `l`)**:
+  - Expand/collapse subtasks directly under parent tasks (`s`), navigate into subtasks with `j`/`k`, toggle completion checkboxes (`Space`), and view Markdown-styled notes (`n` / `K`, full view with `Shift+N`).
+- **Context-Aware Properties Dropdown (`O` / `L` / `p`)**:
   - Schedule shortcuts (`sd` Today, `sm` Tomorrow, `sn` Next Week, `u` Unschedule, `R` Interactive Calendar Date Picker). Mapping sounds weird eh? Until you decide to see it directly then you'll get the intuition later!
-  - Repeat presets, Move Top/Bottom (`mt`/`mb`), Move to Project (`mp`), Add Subtask (`as`), Duplicate (`d`), Delete (`x`).
-  - Also works on Projects and Tags in the sidebar.
+  - Repeat presets, Move Top/Bottom (`mt`/`mb`), Move to Project (`mp`), Add Subtask (`as`), Duplicate (`d`), Delete (`d` / `x` in properties).
+  - Also works on Projects, Tags, and Visual multi-select batches.
 - **3-Mode Focus Timer (`:p` or `P`)**:
   - **Pomodoro**: 25m focus / 5m short break / 15m long break sprints.
   - **Flowtime**: Open-ended count-up timer that calculates an earned break (`elapsed / 5`, minimum 1m).
   - **Countdown**: Custom target countdown (`5m`–`180m`, adjustable with `+`/`-`).
-- **100-Step Undo / Redo**: Press `u` to undo and `Ctrl+R` (or `U`/`r` in Normal mode) to redo up to 100 task mutations. Now it's not really clear what mistake could happen up to 100 steps lol.
-- **Worklog / History (`:hist`) & Simple Counters (`:cnt`)**: Inspect time spent by Day/Week/Month across Projects and Tags, and track daily counters/habits.
+- **100-Step Undo / Redo**: Press `u` to undo and `Ctrl+R` (or `U` in Normal mode) to redo up to 100 task mutations. Now it's not really clear what mistake could happen up to 100 steps lol.
+- **Worklog / History (`:w` / `H`), Daily Summary (`:r` / `E`) & Simple Counters (`:n` / `C`)**: Inspect time spent by Day/Week/Month across Projects and Tags, review end-of-day carry-over tasks, and track daily counters/habits.
 - **Live Theme Editor & 2D Color Picker (`:c`)**:
   - 21 built-in themes including `AMOLED`, `Catppuccin Mocha`, `Catppuccin Latte`, `Tokyo Night`, `Gruvbox Dark`, `Nord`, `Dracula`, `One Dark`, `Solarized Dark/Light`, `Monokai Pro`, `Everforest Dark`, `Kanagawa`, `Rose Pine`, `Rose Pine Moon`, `GitHub Dark`, `Ayu Dark`, `Nightfox`, `Cyberpunk`, `Material Ocean`, and `Default`.
   - Live non-dimmed preview, interactive 2D RGB map + HEX color editor, custom theme saving.
@@ -151,27 +151,39 @@ Super Productivity's Local REST API only exposes read-only `GET /projects` and `
 
 Press `:h` inside the app for the searchable, sectioned keybind manual (`j`/`k`/`g`/`G` to scroll, `/` to search).
 
-| Context            | Key                             | Action                                                                           |
-| :----------------- | :------------------------------ | :------------------------------------------------------------------------------- |
-| **Movement**       | `j` / `k` / `h` / `l` / Arrows  | Move cursor / switch panels / open dropdown                                      |
-|                    | `gg` / `G`                      | Jump to top / bottom of current list                                             |
-| **Tasks**          | `Space`                         | Toggle task or subtask completion                                                |
-|                    | `a`                             | Add task (or add Project/Tag when sidebar is focused)                            |
-|                    | `o` / `l`                       | Open context properties dropdown                                                 |
-|                    | `O` / `L`                       | Quick actions (in sidebar: add Project/Tag; in tasks: details)                   |
-|                    | `/`                             | Live fuzzy task search                                                           |
-|                    | `Shift+N`                       | Toggle full task notes viewer                                                    |
-|                    | `x` / `Delete`                  | Delete selected task                                                             |
-| **Undo / Redo**    | `u`                             | Undo last task operation (up to 100 steps)                                       |
-|                    | `Ctrl+R` (or `U`/`r` in Normal) | Redo undone task operation                                                       |
-| **Views & Timers** | `:p` / `P`                      | Open Focus Timer (`m`/`Tab` mode, `+/-` mins, `Space` play/pause, `l` link task) |
-|                    | `:hist`                         | Open Worklog / History view                                                      |
-|                    | `:cnt`                          | Open Counters & Habits view                                                      |
-|                    | `:c`                            | Open Theme / Colorscheme editor & color picker                                   |
-| **System**         | `S`                             | Sync now with Super Productivity                                                 |
-|                    | `:s`                            | Open Settings                                                                    |
-|                    | `:h`                            | Open Help / Keybinds manual                                                      |
-|                    | `q` / `:q`                      | Quit                                                                             |
+| Context            | Key                                  | Action                                                                           |
+| :----------------- | :----------------------------------- | :------------------------------------------------------------------------------- |
+| **Movement**       | `j` / `k` / Arrows                   | Move cursor up/down in current list                                              |
+|                    | `gg` / `G`                           | Jump to top / bottom of current list                                             |
+| **Navigation**     | `Tab` / `Ctrl+h`                     | Switch focus between Sidebar and Main task list                                  |
+|                    | `Shift+Tab` / `Ctrl+l`               | Switch focus in reverse                                                          |
+|                    | `ga` / `gn`                          | Jump directly to Main area / Navigation sidebar                                  |
+|                    | `hn` (Normal) / `zn` (NVIM)          | Hide / show navigation sidebar                                                   |
+|                    | `/` (in Sidebar)                     | Fuzzy-search sidebar (`n` / `N` next/prev match, `Esc` / `jk` clear)             |
+| **Tasks & Visual** | `Space` / `Enter` / `o` / `l`        | Toggle task/subtask done or open nav item                                        |
+|                    | `a`                                  | Add task (or add Project/Tag when sidebar is focused)                            |
+|                    | `O` / `L` / `p` / `Right-Click`      | Open context Properties dropdown (task / project / tag / batch)                  |
+|                    | `v` / `V`                            | Visual multi-select (`v` toggle item, `V` range select, `Esc` / `jk` exit)       |
+|                    | `d`                                  | Delete task, Project/Tag (in Sidebar), or selected tasks (in Visual mode)        |
+|                    | `i` (NVIM) / `r` (Properties)        | Rename task inline (`Enter` or `jk` to save)                                     |
+|                    | `s`                                  | Show / hide subtasks for selected task                                           |
+|                    | `n` (Normal) / `K` (NVIM)            | Show / hide inline task note                                                     |
+|                    | `Shift+N`                            | Open full Markdown task note viewer                                              |
+|                    | `t`                                  | Start / stop timer on selected task                                              |
+|                    | `R`                                  | Open interactive Reschedule date & time picker                                   |
+|                    | `/` (in Main)                        | Live fuzzy search tasks (title, project, tag)                                    |
+| **Undo / Redo**    | `u`                                  | Undo last task operation (up to 100 steps)                                       |
+|                    | `Ctrl+R` (or `U` in Normal)          | Redo undone task operation                                                       |
+| **Views & Modals** | `:p` / `P`                           | Open Focus Timer (`m`/`Tab` mode, `+/-` mins, `Space` play/pause, `l` link task) |
+|                    | `:r` / `E`                           | Open Daily Summary & End-of-Day Review (`t`/`w`/`u`/`Space`/`A` carry-over)      |
+|                    | `:w` / `H`                           | Open Worklog / History view                                                      |
+|                    | `:n` / `C`                           | Open Counters & Simple Habits view                                               |
+|                    | `:c`                                 | Open Theme / Colorscheme editor & color picker                                   |
+|                    | `jk`                                 | Alternative to `Esc` in modals, dropdowns, Visual mode, and sidebar search       |
+| **System**         | `S`                                  | Sync now with Super Productivity                                                 |
+|                    | `:s`                                 | Open Settings & Bridge status                                                    |
+|                    | `:h`                                 | Open searchable, sectioned Help / Keybinds manual                                |
+|                    | `q` / `:q`                           | Quit                                                                             |
 
 ---
 
