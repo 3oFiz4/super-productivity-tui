@@ -1,7 +1,11 @@
 use crate::api::SuperProductivityClient;
+use crate::bridge::{BridgeAck, BridgeAction, BridgeCommand, BridgeHandle};
 use crate::config::{AppConfig, KeybindMode};
 use crate::keybinds::{JkEscapeTracker, JkResult, SequenceState};
 use crate::models::{CreateTaskPayload, Project, SimpleCounter, Tag, Task};
+use crate::offline::{
+    OfflineCache, QueuedOp, apply_order, sanitize_create_payload_for_sp, sanitize_patch_for_sp,
+};
 use crate::theme::{ThemeConfig, format_hex, map_coords_to_rgb, parse_rgb, rgb_to_map_coords};
 use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 use crossterm::event::{
@@ -9,9 +13,16 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    Offline,
+    Syncing,
+    Online,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusSection {
@@ -243,6 +254,7 @@ pub struct AddEntityState {
     pub title: String,
     pub color: String,
     pub active_field: AddEntityField,
+    pub editing_id: Option<String>,
 }
 
 impl AddEntityState {
@@ -256,6 +268,37 @@ impl AddEntityState {
                 "#a6e3a1".to_string()
             },
             active_field: AddEntityField::Name,
+            editing_id: None,
+        }
+    }
+
+    pub fn edit_project(project: &Project) -> Self {
+        let color = project
+            .color
+            .clone()
+            .or_else(|| project.theme.as_ref().and_then(|t| t.primary.clone()))
+            .unwrap_or_else(|| "#89b4fa".to_string());
+        Self {
+            kind: AddEntityKind::Project,
+            title: project.title.clone(),
+            color,
+            active_field: AddEntityField::Color,
+            editing_id: Some(project.id.clone()),
+        }
+    }
+
+    pub fn edit_tag(tag: &Tag) -> Self {
+        let color = tag
+            .color
+            .clone()
+            .or_else(|| tag.theme.as_ref().and_then(|t| t.primary.clone()))
+            .unwrap_or_else(|| "#a6e3a1".to_string());
+        Self {
+            kind: AddEntityKind::Tag,
+            title: tag.title.clone(),
+            color,
+            active_field: AddEntityField::Color,
+            editing_id: Some(tag.id.clone()),
         }
     }
 }
@@ -648,12 +691,25 @@ pub enum ApiEvent {
     TaskCreated(Task, bool, bool),
     TaskDeleted(String),
     CurrentTaskUpdated(Option<String>),
+    #[allow(dead_code)]
     ProjectCreated(Project),
     ProjectUpdated(Project),
     ProjectDeleted(String),
+    #[allow(dead_code)]
     TagCreated(Tag),
     TagUpdated(Tag),
     TagDeleted(String),
+    HealthCheck(bool),
+    ReplayFinished {
+        replayed: usize,
+        remaining: Vec<QueuedOp>,
+        task_id_map: HashMap<String, String>,
+    },
+    BridgeAcked {
+        cmd: BridgeCommand,
+        ack: BridgeAck,
+    },
+    MutationOfflineFallback(QueuedOp),
     Error(String),
 }
 
@@ -684,7 +740,13 @@ pub struct App {
     pub tags: Vec<Tag>,
     pub counters: Vec<SimpleCounter>,
     pub connected: bool,
+    pub conn_state: ConnectionState,
     pub status_message: String,
+    pub last_health_check_at: Instant,
+    pub health_check_in_flight: bool,
+    pub sync_in_flight: bool,
+    pub offline_cache: OfflineCache,
+    pub bridge: BridgeHandle,
 
     pub show_note: bool,
     pub expanded_subtasks: HashSet<String>,
@@ -730,7 +792,32 @@ impl App {
     pub fn new(config: AppConfig, api_tx: mpsc::UnboundedSender<ApiEvent>) -> Self {
         let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
         let settings_state = SettingsState::from(&config);
-        let counters = config.counters.clone();
+        #[cfg(not(test))]
+        let mut cache = OfflineCache::load();
+        #[cfg(test)]
+        let mut cache = OfflineCache::default();
+        let counters = if cache.counters.is_empty() {
+            config.counters.clone()
+        } else {
+            cache.counters.clone()
+        };
+        let mut projects = cache.projects.clone();
+        for lp in &cache.local_projects {
+            if !projects.iter().any(|p| p.id == lp.id) {
+                projects.push(lp.clone());
+            }
+        }
+        apply_order(&mut projects, &cache.project_order, |p| &p.id);
+        let mut tags = cache.tags.clone();
+        for lt in &cache.local_tags {
+            if !tags.iter().any(|t| t.id == lt.id) {
+                tags.push(lt.clone());
+            }
+        }
+        apply_order(&mut tags, &cache.tag_order, |t| &t.id);
+        let tasks = std::mem::take(&mut cache.tasks);
+        let current_task_id = cache.current_task_id.clone();
+        cache.tasks = tasks.clone();
         Self {
             config,
             client,
@@ -743,12 +830,18 @@ impl App {
             nav_selected: 0,
             task_selected: 0,
             task_scroll: 0,
-            tasks: Vec::new(),
-            projects: Vec::new(),
-            tags: Vec::new(),
+            tasks,
+            projects,
+            tags,
             counters,
             connected: false,
-            status_message: "Connecting...".to_string(),
+            conn_state: ConnectionState::Offline,
+            status_message: String::new(),
+            last_health_check_at: Instant::now(),
+            health_check_in_flight: false,
+            sync_in_flight: false,
+            offline_cache: cache,
+            bridge: BridgeHandle::new(),
             show_note: false,
             expanded_subtasks: HashSet::new(),
             search_active: false,
@@ -759,7 +852,7 @@ impl App {
             prop_jk_tracker: JkEscapeTracker::default(),
             sequence: SequenceState::default(),
             prop_sequence: SequenceState::default(),
-            current_task_id: None,
+            current_task_id,
             timer_started_at: None,
             typed_key_display: String::new(),
             typed_key_at: None,
@@ -786,7 +879,142 @@ impl App {
         }
     }
 
-    pub fn refresh_all(&self) {
+    pub fn save_cache(&mut self) {
+        self.offline_cache.tasks = self.tasks.clone();
+        self.offline_cache.projects = self
+            .projects
+            .iter()
+            .filter(|p| !p.id.starts_with("local-proj-"))
+            .cloned()
+            .collect();
+        self.offline_cache.local_projects = self
+            .projects
+            .iter()
+            .filter(|p| p.id.starts_with("local-proj-"))
+            .cloned()
+            .collect();
+        self.offline_cache.tags = self
+            .tags
+            .iter()
+            .filter(|t| !t.id.starts_with("local-tag-"))
+            .cloned()
+            .collect();
+        self.offline_cache.local_tags = self
+            .tags
+            .iter()
+            .filter(|t| t.id.starts_with("local-tag-"))
+            .cloned()
+            .collect();
+        self.offline_cache.counters = self.counters.clone();
+        self.offline_cache.current_task_id = self.current_task_id.clone();
+        self.offline_cache.project_order = self.projects.iter().map(|p| p.id.clone()).collect();
+        self.offline_cache.tag_order = self.tags.iter().map(|t| t.id.clone()).collect();
+        #[cfg(not(test))]
+        {
+            let _ = self.offline_cache.save();
+        }
+    }
+
+    pub fn enqueue_offline_op(&mut self, op: QueuedOp) {
+        self.offline_cache.pending_ops.push(op);
+        let n = self.offline_cache.pending_ops.len();
+        self.status_message = format!("Queued offline ({n} pending)");
+        self.save_cache();
+    }
+
+    pub fn sync_with_replay(&mut self) {
+        if self.sync_in_flight {
+            return;
+        }
+        self.sync_in_flight = true;
+        self.conn_state = ConnectionState::Syncing;
+        self.last_sync_at = Instant::now();
+
+        let pending = std::mem::take(&mut self.offline_cache.pending_ops);
+        if pending.is_empty() {
+            self.refresh_all_inner();
+            return;
+        }
+
+        let client = self.client.clone();
+        let tx = self.api_tx.clone();
+        let proj_map = self.offline_cache.project_id_map.clone();
+        let tag_map = self.offline_cache.tag_id_map.clone();
+        tokio::spawn(async move {
+            let mut task_id_map: HashMap<String, String> = HashMap::new();
+            let mut replayed = 0usize;
+            let mut remaining = Vec::new();
+            let mut failed = false;
+
+            for op in pending {
+                if failed {
+                    remaining.push(op);
+                    continue;
+                }
+                let ok = match &op {
+                    QueuedOp::CreateTask {
+                        temp_id, payload, ..
+                    } => {
+                        let clean = sanitize_create_payload_for_sp(
+                            payload.clone(),
+                            &task_id_map,
+                            &proj_map,
+                            &tag_map,
+                        );
+                        match client.create_task(clean).await {
+                            Ok(created) => {
+                                task_id_map.insert(temp_id.clone(), created.id);
+                                true
+                            }
+                            Err(_) => false,
+                        }
+                    }
+                    QueuedOp::UpdateTask { id, patch } => {
+                        let real_id = task_id_map.get(id).cloned().unwrap_or_else(|| id.clone());
+                        if real_id.starts_with("offline-task-") {
+                            true
+                        } else {
+                            let clean_patch =
+                                sanitize_patch_for_sp(patch.clone(), &proj_map, &tag_map);
+                            client.update_task(&real_id, clean_patch).await.is_ok()
+                        }
+                    }
+                    QueuedOp::DeleteTask { id } => {
+                        let real_id = task_id_map.get(id).cloned().unwrap_or_else(|| id.clone());
+                        if real_id.starts_with("offline-task-") {
+                            true
+                        } else {
+                            client.delete_task(&real_id).await.is_ok()
+                        }
+                    }
+                    QueuedOp::SetCurrentTask { task_id } => {
+                        let real_id = task_id
+                            .as_ref()
+                            .map(|id| task_id_map.get(id).cloned().unwrap_or_else(|| id.clone()));
+                        client.set_current_task(real_id.as_deref()).await.is_ok()
+                    }
+                };
+                if ok {
+                    replayed += 1;
+                } else {
+                    failed = true;
+                    remaining.push(op);
+                }
+            }
+
+            let _ = tx.send(ApiEvent::ReplayFinished {
+                replayed,
+                remaining,
+                task_id_map,
+            });
+        });
+    }
+
+    pub fn refresh_all(&mut self) {
+        self.sync_with_replay();
+    }
+
+    fn refresh_all_inner(&self) {
         let client = self.client.clone();
         let tx = self.api_tx.clone();
         tokio::spawn(async move {
@@ -807,7 +1035,7 @@ impl App {
                                 counters,
                                 current_task_id,
                                 connected: true,
-                                message: "Connected to Super Productivity".to_string(),
+                                message: String::new(),
                             });
                         }
                         Err(e) => {
@@ -834,7 +1062,7 @@ impl App {
                         message: format!("Server {} (ready={})", h.server, h.renderer_ready),
                     });
                 }
-                Err(e) => {
+                Err(_) => {
                     let _ = tx.send(ApiEvent::Loaded {
                         tasks: Vec::new(),
                         projects: Vec::new(),
@@ -842,7 +1070,7 @@ impl App {
                         counters: None,
                         current_task_id: None,
                         connected: false,
-                        message: format!("Offline: {e}"),
+                        message: String::new(),
                     });
                 }
             }
@@ -860,18 +1088,158 @@ impl App {
                 connected,
                 message,
             } => {
-                self.tasks = tasks;
-                self.projects = projects;
-                self.tags = tags;
-                if let Some(c) = counters {
-                    self.counters = c;
-                }
-                self.timer_started_at = current_task_id.as_ref().map(|_| Instant::now());
-                self.current_task_id = current_task_id;
+                self.sync_in_flight = false;
                 self.connected = connected;
-                self.status_message = message;
+                self.conn_state = if connected {
+                    ConnectionState::Online
+                } else {
+                    ConnectionState::Offline
+                };
+                if connected {
+                    self.tasks = tasks;
+                    let mut merged_projects = projects;
+                    for lp in &self.offline_cache.local_projects {
+                        if !merged_projects.iter().any(|p| p.id == lp.id) {
+                            merged_projects.push(lp.clone());
+                        }
+                    }
+                    apply_order(
+                        &mut merged_projects,
+                        &self.offline_cache.project_order,
+                        |p| &p.id,
+                    );
+                    self.projects = merged_projects;
+
+                    let mut merged_tags = tags;
+                    for lt in &self.offline_cache.local_tags {
+                        if !merged_tags.iter().any(|t| t.id == lt.id) {
+                            merged_tags.push(lt.clone());
+                        }
+                    }
+                    apply_order(&mut merged_tags, &self.offline_cache.tag_order, |t| &t.id);
+                    self.tags = merged_tags;
+
+                    if let Some(c) = counters {
+                        self.counters = c;
+                    }
+                    self.timer_started_at = current_task_id.as_ref().map(|_| Instant::now());
+                    self.current_task_id = current_task_id;
+                    self.save_cache();
+                }
+                if !message.is_empty() {
+                    self.status_message = message;
+                } else if connected && self.status_message == "Syncing..." {
+                    self.status_message.clear();
+                }
                 self.last_sync_at = Instant::now();
                 self.clamp_selections();
+            }
+            ApiEvent::HealthCheck(is_up) => {
+                self.health_check_in_flight = false;
+                if !self.connected && is_up {
+                    self.connected = true;
+                    self.sync_with_replay();
+                } else if self.connected && !is_up {
+                    self.connected = false;
+                    self.conn_state = ConnectionState::Offline;
+                }
+            }
+            ApiEvent::ReplayFinished {
+                replayed,
+                remaining,
+                task_id_map,
+            } => {
+                if !remaining.is_empty() {
+                    let mut restored = remaining;
+                    restored.append(&mut self.offline_cache.pending_ops);
+                    self.offline_cache.pending_ops = restored;
+                }
+                for t in &mut self.tasks {
+                    if let Some(real) = task_id_map.get(&t.id) {
+                        t.id = real.clone();
+                    }
+                    if let Some(pid) = &t.parent_id
+                        && let Some(real) = task_id_map.get(pid)
+                    {
+                        t.parent_id = Some(real.clone());
+                    }
+                }
+                if let Some(cid) = &self.current_task_id
+                    && let Some(real) = task_id_map.get(cid)
+                {
+                    self.current_task_id = Some(real.clone());
+                }
+                self.save_cache();
+                if replayed > 0 {
+                    self.status_message = format!("Synced {replayed} queued change(s)");
+                }
+                self.refresh_all_inner();
+            }
+            ApiEvent::BridgeAcked { cmd, ack } => {
+                if ack.ok {
+                    match &cmd.action {
+                        BridgeAction::CreateProject { local_id, .. } => {
+                            if let Some(real_id) = &ack.entity_id {
+                                self.offline_cache
+                                    .project_id_map
+                                    .insert(local_id.clone(), real_id.clone());
+                                self.offline_cache
+                                    .local_projects
+                                    .retain(|p| &p.id != local_id);
+                                for p in &mut self.projects {
+                                    if &p.id == local_id {
+                                        p.id = real_id.clone();
+                                    }
+                                }
+                                for t in &mut self.tasks {
+                                    if t.project_id.as_deref() == Some(local_id.as_str()) {
+                                        t.project_id = Some(real_id.clone());
+                                    }
+                                }
+                                self.save_cache();
+                                self.status_message = "Project synced to SP".to_string();
+                                self.sync_with_replay();
+                            }
+                        }
+                        BridgeAction::CreateTag { local_id, .. } => {
+                            if let Some(real_id) = &ack.entity_id {
+                                self.offline_cache
+                                    .tag_id_map
+                                    .insert(local_id.clone(), real_id.clone());
+                                self.offline_cache.local_tags.retain(|t| &t.id != local_id);
+                                for t in &mut self.tags {
+                                    if &t.id == local_id {
+                                        t.id = real_id.clone();
+                                    }
+                                }
+                                for task in &mut self.tasks {
+                                    for tid in &mut task.tag_ids {
+                                        if tid == local_id {
+                                            *tid = real_id.clone();
+                                        }
+                                    }
+                                }
+                                self.save_cache();
+                                self.status_message = "Tag synced to SP".to_string();
+                                self.sync_with_replay();
+                            }
+                        }
+                        BridgeAction::UpdateProject { .. }
+                        | BridgeAction::DeleteProject { .. }
+                        | BridgeAction::UpdateTag { .. }
+                        | BridgeAction::DeleteTag { .. } => {
+                            self.status_message = "Synced to SP via bridge".to_string();
+                            self.sync_with_replay();
+                        }
+                    }
+                } else if let Some(err) = ack.error {
+                    self.status_message = format!("Bridge error: {err}");
+                }
+            }
+            ApiEvent::MutationOfflineFallback(op) => {
+                self.connected = false;
+                self.conn_state = ConnectionState::Offline;
+                self.enqueue_offline_op(op);
             }
             ApiEvent::CounterUpdated(updated) => {
                 if let Some(c) = self.counters.iter_mut().find(|c| c.id == updated.id) {
@@ -1228,13 +1596,30 @@ impl App {
                 }
             }
         }
+        if !self.health_check_in_flight
+            && !self.sync_in_flight
+            && self.last_health_check_at.elapsed() >= Duration::from_secs(2)
+        {
+            self.health_check_in_flight = true;
+            self.last_health_check_at = Instant::now();
+            let client = self.client.clone();
+            let tx = self.api_tx.clone();
+            tokio::spawn(async move {
+                let is_up = matches!(
+                    client.health().await,
+                    Ok(h) if h.server == "up" && h.renderer_ready
+                );
+                let _ = tx.send(ApiEvent::HealthCheck(is_up));
+            });
+        }
+
         if self.connected
+            && !self.sync_in_flight
             && self.active_modal == ActiveModal::None
             && self.rename_target.is_none()
             && self.last_sync_at.elapsed() >= Duration::from_secs(30)
         {
-            self.last_sync_at = Instant::now();
-            self.refresh_all();
+            self.sync_with_replay();
         }
     }
 
@@ -1487,7 +1872,7 @@ impl App {
                 'q' => self.should_quit = true,
                 'S' => {
                     self.status_message = "Syncing...".to_string();
-                    self.refresh_all();
+                    self.sync_with_replay();
                 }
                 'H' => {
                     self.history_state.scroll = 0;
@@ -1745,18 +2130,30 @@ impl App {
                     if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task.id) {
                         t.is_done = next_done;
                     }
-                    let client = self.client.clone();
-                    let tx = self.api_tx.clone();
-                    tokio::spawn(async move {
-                        match client.toggle_done(&task.id, next_done).await {
-                            Ok(t) => {
-                                let _ = tx.send(ApiEvent::TaskUpdated(t));
+                    if !self.connected || task.id.starts_with("offline-task-") {
+                        self.enqueue_offline_op(QueuedOp::UpdateTask {
+                            id: task.id,
+                            patch: json!({ "isDone": next_done }),
+                        });
+                    } else {
+                        let client = self.client.clone();
+                        let tx = self.api_tx.clone();
+                        tokio::spawn(async move {
+                            match client.toggle_done(&task.id, next_done).await {
+                                Ok(t) => {
+                                    let _ = tx.send(ApiEvent::TaskUpdated(t));
+                                }
+                                Err(_) => {
+                                    let _ = tx.send(ApiEvent::MutationOfflineFallback(
+                                        QueuedOp::UpdateTask {
+                                            id: task.id,
+                                            patch: json!({ "isDone": next_done }),
+                                        },
+                                    ));
+                                }
                             }
-                            Err(e) => {
-                                let _ = tx.send(ApiEvent::Error(format!("Update failed: {e}")));
-                            }
-                        }
-                    });
+                        });
+                    }
                 }
             }
         }
@@ -1823,18 +2220,25 @@ impl App {
             });
             self.tasks.retain(|t| t.id != task.id);
             self.clamp_selections();
-            let client = self.client.clone();
-            let tx = self.api_tx.clone();
-            tokio::spawn(async move {
-                match client.delete_task(&task.id).await {
-                    Ok(()) => {
-                        let _ = tx.send(ApiEvent::TaskDeleted(task.id));
+            if !self.connected || task.id.starts_with("offline-task-") {
+                self.enqueue_offline_op(QueuedOp::DeleteTask { id: task.id });
+            } else {
+                let client = self.client.clone();
+                let tx = self.api_tx.clone();
+                tokio::spawn(async move {
+                    match client.delete_task(&task.id).await {
+                        Ok(()) => {
+                            let _ = tx.send(ApiEvent::TaskDeleted(task.id));
+                        }
+                        Err(_) => {
+                            let _ =
+                                tx.send(ApiEvent::MutationOfflineFallback(QueuedOp::DeleteTask {
+                                    id: task.id,
+                                }));
+                        }
                     }
-                    Err(e) => {
-                        let _ = tx.send(ApiEvent::Error(format!("Delete failed: {e}")));
-                    }
-                }
-            });
+                });
+            }
         }
     }
 
@@ -1849,18 +2253,24 @@ impl App {
         };
         self.timer_started_at = next_id.as_ref().map(|_| Instant::now());
         self.current_task_id = next_id.clone();
-        let client = self.client.clone();
-        let tx = self.api_tx.clone();
-        tokio::spawn(async move {
-            match client.set_current_task(next_id.as_deref()).await {
-                Ok(()) => {
-                    let _ = tx.send(ApiEvent::CurrentTaskUpdated(next_id));
+        if !self.connected {
+            self.enqueue_offline_op(QueuedOp::SetCurrentTask { task_id: next_id });
+        } else {
+            let client = self.client.clone();
+            let tx = self.api_tx.clone();
+            tokio::spawn(async move {
+                match client.set_current_task(next_id.as_deref()).await {
+                    Ok(()) => {
+                        let _ = tx.send(ApiEvent::CurrentTaskUpdated(next_id));
+                    }
+                    Err(_) => {
+                        let _ = tx.send(ApiEvent::MutationOfflineFallback(
+                            QueuedOp::SetCurrentTask { task_id: next_id },
+                        ));
+                    }
                 }
-                Err(e) => {
-                    let _ = tx.send(ApiEvent::Error(format!("Timer failed: {e}")));
-                }
-            }
-        });
+            });
+        }
     }
 
     fn push_undo(&mut self, op: UndoOp) {
@@ -2007,37 +2417,119 @@ impl App {
         self.clamp_selections();
     }
 
-    fn spawn_patch(&self, id: String, patch: serde_json::Value) {
+    fn spawn_patch(&mut self, id: String, patch: serde_json::Value) {
+        if !self.connected || id.starts_with("offline-task-") {
+            self.enqueue_offline_op(QueuedOp::UpdateTask { id, patch });
+            return;
+        }
+        let clean_patch = sanitize_patch_for_sp(
+            patch.clone(),
+            &self.offline_cache.project_id_map,
+            &self.offline_cache.tag_id_map,
+        );
         let client = self.client.clone();
         let tx = self.api_tx.clone();
         tokio::spawn(async move {
-            match client.update_task(&id, patch).await {
+            match client.update_task(&id, clean_patch).await {
                 Ok(t) => {
                     let _ = tx.send(ApiEvent::TaskUpdated(t));
                 }
-                Err(e) => {
-                    let _ = tx.send(ApiEvent::Error(format!("Update failed: {e}")));
+                Err(_) => {
+                    let _ = tx.send(ApiEvent::MutationOfflineFallback(QueuedOp::UpdateTask {
+                        id,
+                        patch,
+                    }));
                 }
             }
         });
     }
 
-    fn spawn_create(&self, payload: CreateTaskPayload, to_top: bool, record_undo: bool) {
+    fn spawn_create(&mut self, payload: CreateTaskPayload, to_top: bool, record_undo: bool) {
+        if !self.connected {
+            let temp_id = format!("offline-task-{}", Local::now().timestamp_millis());
+            let task = Task {
+                id: temp_id.clone(),
+                title: payload.title.clone(),
+                is_done: false,
+                notes: payload.notes.clone(),
+                project_id: payload.project_id.clone(),
+                parent_id: payload.parent_id.clone(),
+                tag_ids: payload.tag_ids.clone(),
+                due_day: payload.due_day.clone(),
+                deadline_day: payload.deadline_day.clone(),
+                done_on: None,
+                time_estimate: payload.time_estimate,
+                time_spent: payload.time_spent,
+                repeat_cfg_id: None,
+            };
+            if record_undo {
+                self.push_undo(UndoOp::CreateTask {
+                    task: task.clone(),
+                    to_top,
+                });
+            } else if let Some(UndoOp::DeleteTask { task: dt, .. }) = self.redo_stack.last_mut() {
+                dt.id = temp_id.clone();
+            }
+            if to_top {
+                self.tasks.insert(0, task);
+                self.task_selected = 0;
+            } else {
+                self.tasks.push(task);
+            }
+            self.clamp_selections();
+            self.enqueue_offline_op(QueuedOp::CreateTask {
+                temp_id,
+                payload,
+                to_top,
+            });
+            return;
+        }
+        let clean_payload = sanitize_create_payload_for_sp(
+            payload.clone(),
+            &HashMap::new(),
+            &self.offline_cache.project_id_map,
+            &self.offline_cache.tag_id_map,
+        );
         let client = self.client.clone();
         let tx = self.api_tx.clone();
         tokio::spawn(async move {
-            match client.create_task(payload).await {
+            match client.create_task(clean_payload).await {
                 Ok(t) => {
                     let _ = tx.send(ApiEvent::TaskCreated(t, to_top, record_undo));
                 }
-                Err(e) => {
-                    let _ = tx.send(ApiEvent::Error(format!("Create failed: {e}")));
+                Err(_) => {
+                    let temp_id = format!("offline-task-{}", Local::now().timestamp_millis());
+                    let task = Task {
+                        id: temp_id.clone(),
+                        title: payload.title.clone(),
+                        is_done: false,
+                        notes: payload.notes.clone(),
+                        project_id: payload.project_id.clone(),
+                        parent_id: payload.parent_id.clone(),
+                        tag_ids: payload.tag_ids.clone(),
+                        due_day: payload.due_day.clone(),
+                        deadline_day: payload.deadline_day.clone(),
+                        done_on: None,
+                        time_estimate: payload.time_estimate,
+                        time_spent: payload.time_spent,
+                        repeat_cfg_id: None,
+                    };
+                    let _ = tx.send(ApiEvent::TaskCreated(task, to_top, record_undo));
+                    let _ = tx.send(ApiEvent::MutationOfflineFallback(QueuedOp::CreateTask {
+                        temp_id,
+                        payload,
+                        to_top,
+                    }));
                 }
             }
         });
     }
 
-    fn spawn_delete(&self, id: String) {
+    fn spawn_delete(&mut self, id: String) {
+        if !self.connected || id.starts_with("offline-task-") {
+            self.enqueue_offline_op(QueuedOp::DeleteTask { id });
+            return;
+        }
         let client = self.client.clone();
         let tx = self.api_tx.clone();
         tokio::spawn(async move {
@@ -2045,8 +2537,10 @@ impl App {
                 Ok(()) => {
                     let _ = tx.send(ApiEvent::TaskDeleted(id));
                 }
-                Err(e) => {
-                    let _ = tx.send(ApiEvent::Error(format!("Delete failed: {e}")));
+                Err(_) => {
+                    let _ = tx.send(ApiEvent::MutationOfflineFallback(QueuedOp::DeleteTask {
+                        id,
+                    }));
                 }
             }
         });
@@ -2126,19 +2620,59 @@ impl App {
                         self.jk_tracker = JkEscapeTracker::default();
                     }
                 }
+                'c' => {
+                    if let Some(p) = self.projects.iter().find(|p| p.id == pid) {
+                        self.add_entity_state = AddEntityState::edit_project(p);
+                        self.active_modal = ActiveModal::AddEntity;
+                    }
+                }
+                'u' => {
+                    if let Some(pos) = self.projects.iter().position(|p| p.id == pid)
+                        && pos > 0
+                    {
+                        self.projects.swap(pos, pos - 1);
+                        self.save_cache();
+                        self.status_message = "Project moved up".to_string();
+                    }
+                    self.active_modal = ActiveModal::None;
+                }
+                'n' => {
+                    if let Some(pos) = self.projects.iter().position(|p| p.id == pid)
+                        && pos + 1 < self.projects.len()
+                    {
+                        self.projects.swap(pos, pos + 1);
+                        self.save_cache();
+                        self.status_message = "Project moved down".to_string();
+                    }
+                    self.active_modal = ActiveModal::None;
+                }
                 'd' => {
                     self.active_modal = ActiveModal::None;
                     self.projects.retain(|p| p.id != pid);
+                    self.offline_cache.local_projects.retain(|p| p.id != pid);
+                    self.save_cache();
+                    if !pid.starts_with("local-proj-") {
+                        self.bridge
+                            .enqueue(BridgeAction::DeleteProject { id: pid.clone() });
+                    }
                     let client = self.client.clone();
                     let tx = self.api_tx.clone();
+                    let plugin_active = self.bridge.is_plugin_active();
                     tokio::spawn(async move {
                         match client.delete_project(&pid).await {
                             Ok(()) => {
                                 let _ = tx.send(ApiEvent::ProjectDeleted(pid));
                             }
-                            Err(e) => {
-                                let _ =
-                                    tx.send(ApiEvent::Error(format!("Delete project failed: {e}")));
+                            Err(_) if plugin_active => {
+                                let _ = tx.send(ApiEvent::Error(
+                                    "Project delete queued via SP bridge".to_string(),
+                                ));
+                            }
+                            Err(_) => {
+                                let _ = tx.send(ApiEvent::Error(
+                                    "Deleted locally (install sp-tui-bridge plugin to sync)"
+                                        .to_string(),
+                                ));
                             }
                         }
                     });
@@ -2154,18 +2688,59 @@ impl App {
                         self.jk_tracker = JkEscapeTracker::default();
                     }
                 }
+                'c' => {
+                    if let Some(t) = self.tags.iter().find(|t| t.id == tid) {
+                        self.add_entity_state = AddEntityState::edit_tag(t);
+                        self.active_modal = ActiveModal::AddEntity;
+                    }
+                }
+                'u' => {
+                    if let Some(pos) = self.tags.iter().position(|t| t.id == tid)
+                        && pos > 0
+                    {
+                        self.tags.swap(pos, pos - 1);
+                        self.save_cache();
+                        self.status_message = "Tag moved up".to_string();
+                    }
+                    self.active_modal = ActiveModal::None;
+                }
+                'n' => {
+                    if let Some(pos) = self.tags.iter().position(|t| t.id == tid)
+                        && pos + 1 < self.tags.len()
+                    {
+                        self.tags.swap(pos, pos + 1);
+                        self.save_cache();
+                        self.status_message = "Tag moved down".to_string();
+                    }
+                    self.active_modal = ActiveModal::None;
+                }
                 'd' => {
                     self.active_modal = ActiveModal::None;
                     self.tags.retain(|t| t.id != tid);
+                    self.offline_cache.local_tags.retain(|t| t.id != tid);
+                    self.save_cache();
+                    if !tid.starts_with("local-tag-") {
+                        self.bridge
+                            .enqueue(BridgeAction::DeleteTag { id: tid.clone() });
+                    }
                     let client = self.client.clone();
                     let tx = self.api_tx.clone();
+                    let plugin_active = self.bridge.is_plugin_active();
                     tokio::spawn(async move {
                         match client.delete_tag(&tid).await {
                             Ok(()) => {
                                 let _ = tx.send(ApiEvent::TagDeleted(tid));
                             }
-                            Err(e) => {
-                                let _ = tx.send(ApiEvent::Error(format!("Delete tag failed: {e}")));
+                            Err(_) if plugin_active => {
+                                let _ = tx.send(ApiEvent::Error(
+                                    "Tag delete queued via SP bridge".to_string(),
+                                ));
+                            }
+                            Err(_) => {
+                                let _ = tx.send(ApiEvent::Error(
+                                    "Deleted locally (install sp-tui-bridge plugin to sync)"
+                                        .to_string(),
+                                ));
                             }
                         }
                     });
@@ -2353,28 +2928,55 @@ impl App {
                         new_title: new_title.clone(),
                     });
                 }
-                tokio::spawn(async move {
-                    match client.rename_task(&id, &new_title).await {
-                        Ok(t) => {
-                            let _ = tx.send(ApiEvent::TaskUpdated(t));
+                if !self.connected || id.starts_with("offline-task-") {
+                    self.enqueue_offline_op(QueuedOp::UpdateTask {
+                        id,
+                        patch: json!({ "title": new_title }),
+                    });
+                } else {
+                    tokio::spawn(async move {
+                        match client.rename_task(&id, &new_title).await {
+                            Ok(t) => {
+                                let _ = tx.send(ApiEvent::TaskUpdated(t));
+                            }
+                            Err(_) => {
+                                let _ = tx.send(ApiEvent::MutationOfflineFallback(
+                                    QueuedOp::UpdateTask {
+                                        id,
+                                        patch: json!({ "title": new_title }),
+                                    },
+                                ));
+                            }
                         }
-                        Err(e) => {
-                            let _ = tx.send(ApiEvent::Error(format!("Rename failed: {e}")));
-                        }
-                    }
-                });
+                    });
+                }
             }
             RenameTarget::Project(id) => {
                 if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
                     p.title = new_title.clone();
                 }
+                self.save_cache();
+                self.bridge.enqueue(BridgeAction::UpdateProject {
+                    id: id.clone(),
+                    title: Some(new_title.clone()),
+                    color: None,
+                });
+                let plugin_active = self.bridge.is_plugin_active();
                 tokio::spawn(async move {
                     match client.rename_project(&id, &new_title).await {
                         Ok(p) => {
                             let _ = tx.send(ApiEvent::ProjectUpdated(p));
                         }
-                        Err(e) => {
-                            let _ = tx.send(ApiEvent::Error(format!("Rename project failed: {e}")));
+                        Err(_) if plugin_active => {
+                            let _ = tx.send(ApiEvent::Error(
+                                "Project rename queued via SP bridge".to_string(),
+                            ));
+                        }
+                        Err(_) => {
+                            let _ = tx.send(ApiEvent::Error(
+                                "Renamed locally (install sp-tui-bridge plugin to sync)"
+                                    .to_string(),
+                            ));
                         }
                     }
                 });
@@ -2383,13 +2985,28 @@ impl App {
                 if let Some(t) = self.tags.iter_mut().find(|t| t.id == id) {
                     t.title = new_title.clone();
                 }
+                self.save_cache();
+                self.bridge.enqueue(BridgeAction::UpdateTag {
+                    id: id.clone(),
+                    title: Some(new_title.clone()),
+                    color: None,
+                });
+                let plugin_active = self.bridge.is_plugin_active();
                 tokio::spawn(async move {
                     match client.rename_tag(&id, &new_title).await {
                         Ok(t) => {
                             let _ = tx.send(ApiEvent::TagUpdated(t));
                         }
-                        Err(e) => {
-                            let _ = tx.send(ApiEvent::Error(format!("Rename tag failed: {e}")));
+                        Err(_) if plugin_active => {
+                            let _ = tx.send(ApiEvent::Error(
+                                "Tag rename queued via SP bridge".to_string(),
+                            ));
+                        }
+                        Err(_) => {
+                            let _ = tx.send(ApiEvent::Error(
+                                "Renamed locally (install sp-tui-bridge plugin to sync)"
+                                    .to_string(),
+                            ));
                         }
                     }
                 });
@@ -2699,18 +3316,7 @@ impl App {
                     is_add_to_top: Some(to_top),
                 };
                 self.active_modal = ActiveModal::None;
-                let client = self.client.clone();
-                let tx = self.api_tx.clone();
-                tokio::spawn(async move {
-                    match client.create_task(payload).await {
-                        Ok(t) => {
-                            let _ = tx.send(ApiEvent::TaskCreated(t, to_top, true));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(ApiEvent::Error(format!("Create failed: {e}")));
-                        }
-                    }
-                });
+                self.spawn_create(payload, to_top, true);
             }
             KeyCode::Left => match self.add_task_state.active_field {
                 AddTaskField::Position => {
@@ -3025,68 +3631,114 @@ impl App {
                 }
                 let color = self.add_entity_state.color.clone();
                 let kind = self.add_entity_state.kind;
+                let editing_id = self.add_entity_state.editing_id.clone();
                 self.active_modal = ActiveModal::None;
-                let client = self.client.clone();
-                let tx = self.api_tx.clone();
-                tokio::spawn(async move {
+
+                if let Some(id) = editing_id {
                     match kind {
-                        AddEntityKind::Project => match client.create_project(&title, &color).await
-                        {
-                            Ok(p) => {
-                                let _ = tx.send(ApiEvent::ProjectCreated(p));
+                        AddEntityKind::Project => {
+                            if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
+                                p.title = title.clone();
+                                p.color = Some(color.clone());
+                                p.theme = Some(crate::models::EntityTheme {
+                                    primary: Some(color.clone()),
+                                });
                             }
-                            Err(e) => {
-                                let msg = e.to_string();
-                                if msg.contains("Route not found") || msg.contains("NOT_FOUND") {
-                                    let _ = tx.send(ApiEvent::ProjectCreated(Project {
-                                        id: format!(
-                                            "local-proj-{}",
-                                            Local::now().timestamp_millis()
-                                        ),
-                                        title,
-                                        theme: Some(crate::models::EntityTheme {
-                                            primary: Some(color),
-                                        }),
-                                        color: None,
-                                    }));
-                                    let _ = tx.send(ApiEvent::Error(
-                                        "Added locally (SP REST API has no POST /projects)"
-                                            .to_string(),
-                                    ));
-                                } else {
-                                    let _ = tx.send(ApiEvent::Error(format!(
-                                        "Create project failed: {e}"
-                                    )));
-                                }
+                            self.save_cache();
+                            self.bridge.enqueue(BridgeAction::UpdateProject {
+                                id,
+                                title: Some(title),
+                                color: Some(color),
+                            });
+                            self.status_message = if self.bridge.is_plugin_active() {
+                                "Project update queued via SP bridge".to_string()
+                            } else {
+                                "Project updated locally".to_string()
+                            };
+                        }
+                        AddEntityKind::Tag => {
+                            if let Some(t) = self.tags.iter_mut().find(|t| t.id == id) {
+                                t.title = title.clone();
+                                t.color = Some(color.clone());
                             }
-                        },
-                        AddEntityKind::Tag => match client.create_tag(&title, &color).await {
-                            Ok(t) => {
-                                let _ = tx.send(ApiEvent::TagCreated(t));
-                            }
-                            Err(e) => {
-                                let msg = e.to_string();
-                                if msg.contains("Route not found") || msg.contains("NOT_FOUND") {
-                                    let _ = tx.send(ApiEvent::TagCreated(Tag {
-                                        id: format!(
-                                            "local-tag-{}",
-                                            Local::now().timestamp_millis()
-                                        ),
-                                        title,
-                                        color: Some(color),
-                                        theme: None,
-                                    }));
-                                    let _ = tx.send(ApiEvent::Error(
-                                        "Added locally (SP REST API has no POST /tags)".to_string(),
-                                    ));
-                                } else {
-                                    let _ =
-                                        tx.send(ApiEvent::Error(format!("Create tag failed: {e}")));
-                                }
-                            }
-                        },
+                            self.save_cache();
+                            self.bridge.enqueue(BridgeAction::UpdateTag {
+                                id,
+                                title: Some(title),
+                                color: Some(color),
+                            });
+                            self.status_message = if self.bridge.is_plugin_active() {
+                                "Tag update queued via SP bridge".to_string()
+                            } else {
+                                "Tag updated locally".to_string()
+                            };
+                        }
                     }
-                });
+                    return;
+                }
+
+                let local_id = match kind {
+                    AddEntityKind::Project => {
+                        format!("local-proj-{}", Local::now().timestamp_millis())
+                    }
+                    AddEntityKind::Tag => {
+                        format!("local-tag-{}", Local::now().timestamp_millis())
+                    }
+                };
+                match kind {
+                    AddEntityKind::Project => {
+                        let proj = Project {
+                            id: local_id.clone(),
+                            title: title.clone(),
+                            theme: Some(crate::models::EntityTheme {
+                                primary: Some(color.clone()),
+                            }),
+                            color: None,
+                        };
+                        self.projects.push(proj);
+                        self.save_cache();
+                        self.bridge.enqueue(BridgeAction::CreateProject {
+                            local_id: local_id.clone(),
+                            title: title.clone(),
+                            color: color.clone(),
+                        });
+                    }
+                    AddEntityKind::Tag => {
+                        let tag = Tag {
+                            id: local_id.clone(),
+                            title: title.clone(),
+                            color: Some(color.clone()),
+                            theme: None,
+                        };
+                        self.tags.push(tag);
+                        self.save_cache();
+                        self.bridge.enqueue(BridgeAction::CreateTag {
+                            local_id: local_id.clone(),
+                            title: title.clone(),
+                            color: color.clone(),
+                        });
+                    }
+                }
+                self.clamp_selections();
+                self.status_message = if self.bridge.is_plugin_active() {
+                    format!(
+                        "{} queued via SP bridge",
+                        if kind == AddEntityKind::Project {
+                            "Project"
+                        } else {
+                            "Tag"
+                        }
+                    )
+                } else {
+                    format!(
+                        "{} saved locally (install sp-tui-bridge plugin to sync to SP)",
+                        if kind == AddEntityKind::Project {
+                            "Project"
+                        } else {
+                            "Tag"
+                        }
+                    )
+                };
             }
             KeyCode::Backspace => match self.add_entity_state.active_field {
                 AddEntityField::Name => {
@@ -3555,5 +4207,119 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert_eq!(app.active_modal, ActiveModal::AddTask);
         assert_eq!(app.add_task_state.project_idx, 1);
+    }
+
+    #[tokio::test]
+    async fn live_health_transition_triggers_sync_and_preserves_cache_offline() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        app.tasks.push(Task {
+            id: "t1".into(),
+            title: "Cached task".into(),
+            is_done: false,
+            notes: None,
+            project_id: None,
+            parent_id: None,
+            tag_ids: vec![],
+            due_day: None,
+            deadline_day: None,
+            done_on: None,
+            time_estimate: None,
+            time_spent: None,
+            repeat_cfg_id: None,
+        });
+
+        // Failed Loaded preserves cached tasks and sets Offline
+        app.handle_api_event(ApiEvent::Loaded {
+            tasks: vec![],
+            projects: vec![],
+            tags: vec![],
+            counters: None,
+            current_task_id: None,
+            connected: false,
+            message: String::new(),
+        });
+        assert_eq!(app.conn_state, ConnectionState::Offline);
+        assert_eq!(app.tasks.len(), 1);
+
+        // HealthCheck(true) transitions Offline -> Online -> Syncing
+        app.handle_api_event(ApiEvent::HealthCheck(true));
+        assert!(app.connected);
+        assert_eq!(app.conn_state, ConnectionState::Syncing);
+        assert!(app.sync_in_flight);
+
+        // Successful Loaded transitions Syncing -> Online
+        app.handle_api_event(ApiEvent::Loaded {
+            tasks: app.tasks.clone(),
+            projects: vec![],
+            tags: vec![],
+            counters: None,
+            current_task_id: None,
+            connected: true,
+            message: String::new(),
+        });
+        assert_eq!(app.conn_state, ConnectionState::Online);
+        assert!(!app.sync_in_flight);
+
+        // HealthCheck(false) transitions Online -> Offline
+        app.handle_api_event(ApiEvent::HealthCheck(false));
+        assert!(!app.connected);
+        assert_eq!(app.conn_state, ConnectionState::Offline);
+    }
+
+    #[tokio::test]
+    async fn offline_mutations_queue_and_bridge_ack_maps_project_id() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        app.connected = false;
+
+        // Create a local project
+        app.add_entity_state = AddEntityState::new(AddEntityKind::Project);
+        app.add_entity_state.title = "Side Quest".into();
+        app.active_modal = ActiveModal::AddEntity;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.projects.len(), 1);
+        let local_pid = app.projects[0].id.clone();
+        assert!(local_pid.starts_with("local-proj-"));
+
+        // Create a task offline assigned to that local project
+        app.spawn_create(
+            CreateTaskPayload {
+                title: "Offline Task".into(),
+                notes: None,
+                project_id: Some(local_pid.clone()),
+                parent_id: None,
+                tag_ids: vec![],
+                due_day: None,
+                deadline_day: None,
+                time_estimate: None,
+                time_spent: None,
+                is_add_to_top: Some(false),
+            },
+            false,
+            true,
+        );
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.offline_cache.pending_ops.len(), 1);
+
+        // Bridge ack maps local-proj-* to real SP ID
+        app.handle_api_event(ApiEvent::BridgeAcked {
+            cmd: BridgeCommand {
+                cmd_id: "cmd-1".into(),
+                action: BridgeAction::CreateProject {
+                    local_id: local_pid.clone(),
+                    title: "Side Quest".into(),
+                    color: "#89b4fa".into(),
+                },
+            },
+            ack: BridgeAck {
+                cmd_id: "cmd-1".into(),
+                ok: true,
+                entity_id: Some("real-sp-proj-123".into()),
+                error: None,
+            },
+        });
+        assert_eq!(app.projects[0].id, "real-sp-proj-123");
+        assert_eq!(app.tasks[0].project_id.as_deref(), Some("real-sp-proj-123"));
     }
 }

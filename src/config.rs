@@ -52,6 +52,12 @@ pub struct AppConfig {
     pub saved_themes: Vec<ThemeConfig>,
     #[serde(default)]
     pub counters: Vec<SimpleCounter>,
+    #[serde(default = "default_bridge_port")]
+    pub bridge_port: u16,
+}
+
+fn default_bridge_port() -> u16 {
+    3877
 }
 
 impl Default for AppConfig {
@@ -77,6 +83,7 @@ impl Default for AppConfig {
                     is_on: false,
                 },
             ],
+            bridge_port: default_bridge_port(),
         }
     }
 }

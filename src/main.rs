@@ -1,8 +1,10 @@
 mod api;
 mod app;
+mod bridge;
 mod config;
 mod keybinds;
 mod models;
+mod offline;
 mod short_syntax;
 mod theme;
 mod ui;
@@ -46,7 +48,10 @@ async fn main() -> Result<()> {
 async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     let config = AppConfig::load();
     let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiEvent>();
+    let bridge = bridge::BridgeHandle::new();
+    bridge::spawn_bridge_server(config.bridge_port, bridge.clone(), api_tx.clone());
     let mut app = App::new(config, api_tx);
+    app.bridge = bridge;
     app.refresh_all();
 
     let mut events = EventStream::new();

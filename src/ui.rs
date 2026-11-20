@@ -1,6 +1,6 @@
 use crate::app::{
-    ActiveModal, AddEntityField, AddEntityKind, AddTaskField, App, CompletionKind, FocusMode,
-    FocusSection, HistoryTab, HistoryTimeframe, NavFilter, NavItemKind, PomodoroPhase,
+    ActiveModal, AddEntityField, AddEntityKind, AddTaskField, App, CompletionKind, ConnectionState,
+    FocusMode, FocusSection, HistoryTab, HistoryTimeframe, NavFilter, NavItemKind, PomodoroPhase,
     PropertiesMode, PropertiesTarget, SettingsField, ThemeEditorState, ThemePickerFocus,
 };
 use crate::config::KeybindMode;
@@ -541,10 +541,10 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "hn: sidebar"
     };
-    let status_color = if app.connected {
-        app.config.theme.success_color()
-    } else {
-        app.config.theme.danger_color()
+    let (conn_label, conn_color) = match app.conn_state {
+        ConnectionState::Online => ("\u{25cf} Online", app.config.theme.success_color()),
+        ConnectionState::Syncing => ("\u{25cf} Sync...", Color::Rgb(96, 165, 250)),
+        ConnectionState::Offline => ("\u{25cf} Offline", app.config.theme.danger_color()),
     };
 
     let mut spans = Vec::new();
@@ -597,11 +597,25 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     spans.push(Span::styled(
-        format!(" {} ", app.status_message),
-        Style::default().fg(status_color),
+        format!(" {conn_label} "),
+        Style::default().fg(conn_color).add_modifier(Modifier::BOLD),
     ));
+    if !app.offline_cache.pending_ops.is_empty() {
+        spans.push(Span::styled(
+            format!("[Q:{}] ", app.offline_cache.pending_ops.len()),
+            Style::default()
+                .fg(app.config.theme.warning_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if !app.status_message.is_empty() {
+        spans.push(Span::styled(
+            format!("| {} ", app.status_message),
+            Style::default().fg(app.config.theme.fg_color()),
+        ));
+    }
     spans.push(Span::styled(
-        format!(" | {nav_toggle_hint} | :h help | :s settings | :c theme "),
+        format!("| {nav_toggle_hint} | :h help | :s settings | :c theme "),
         Style::default().fg(app.config.theme.muted_color()),
     ));
 
@@ -681,6 +695,9 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
             " Project Properties ",
             vec![
                 Line::from(hint_spans("rename", hint, base, hc)),
+                Line::from(hint_spans("color", hint, base, hc)),
+                Line::from(hint_spans("up (move)", hint, base, hc)),
+                Line::from(hint_indices("next/down", hint, &[0], base, hc)),
                 Line::from(hint_spans("delete", hint, base, hc)),
                 Line::from(""),
                 Line::from(Span::styled(
@@ -693,6 +710,9 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
             " Tag Properties ",
             vec![
                 Line::from(hint_spans("rename", hint, base, hc)),
+                Line::from(hint_spans("color", hint, base, hc)),
+                Line::from(hint_spans("up (move)", hint, base, hc)),
+                Line::from(hint_indices("next/down", hint, &[0], base, hc)),
                 Line::from(hint_spans("delete", hint, base, hc)),
                 Line::from(""),
                 Line::from(Span::styled(
@@ -1343,9 +1363,11 @@ fn render_add_entity_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Clear, popup);
 
     let st = &app.add_entity_state;
-    let title = match st.kind {
-        AddEntityKind::Project => " Add Project (a) ",
-        AddEntityKind::Tag => " Add Tag (a) ",
+    let title = match (st.kind, st.editing_id.is_some()) {
+        (AddEntityKind::Project, false) => " Add Project (a) ",
+        (AddEntityKind::Project, true) => " Edit Project ",
+        (AddEntityKind::Tag, false) => " Add Tag (a) ",
+        (AddEntityKind::Tag, true) => " Edit Tag ",
     };
 
     let block = Block::default()

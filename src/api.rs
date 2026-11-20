@@ -228,6 +228,7 @@ impl SuperProductivityClient {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn create_project(&self, title: &str, color: &str) -> Result<Project> {
         let resp = self
             .http
@@ -239,6 +240,7 @@ impl SuperProductivityClient {
         Self::parse_response(resp).await
     }
 
+    #[allow(dead_code)]
     pub async fn create_tag(&self, title: &str, color: &str) -> Result<Tag> {
         let resp = self
             .http
