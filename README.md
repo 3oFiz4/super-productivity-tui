@@ -210,12 +210,13 @@ When typing a task **Title**, you can embed inline tokens (with floating autocom
 
 ## CLI Subcommands
 
-Run `spt <command>` for non-interactive scripting, cron jobs, and status bars (supports theme colors, tree-formatted lists, short flags like `-t`/`-p`/`-j`, typo auto-correction for `#tag`/`+project`/`@due`/`!deadline`, and SQL-like dot IDs like `G2.` or `._g`):
+Run `spt <command>` for non-interactive scripting, cron jobs, and status bars (supports theme colors, tree-formatted lists, short flags like `-t`/`-p`/`-j`, typo auto-correction for `#tag`/`+project`/`@due`/`!deadline`, SQL-like dot IDs like `G2.`/`._g`, and **multi-ID selection** via `AB1,AB2` or `AB1 AB2` on `done`, `edit`, `schedule`, and `rm`):
 
 ```bash
 spt add "Ship release +Work #prioriyt t30m/1h @today !friday" -t   # auto-fixes #prioriyt -> #priority
 spt ls today -p Work
-spt done G2.                                                       # matches ID starting with G2
+spt done G2.,._g                                                   # multi-ID completion (comma or space separated)
+spt edit AB1,AB2 "+Work #urgent @tomorrow"                         # multi-ID metadata edit (excludes title)
 spt schedule ._g tomorrow -r 09:30                                 # matches ID ending with _g
 spt start "Ship release" && spt stop
 spt log "Ship release" 25m

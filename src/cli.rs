@@ -71,21 +71,33 @@ fn paint_bold(c: Color, text: &str, enabled: bool) -> String {
 
 pub fn print_error(msg: &str, color_on: bool) {
     let danger = AppConfig::load().theme.danger_color();
-    eprintln!(
-        "{}",
-        paint_bold(danger, &format!("!!! [ERROR] !!! {msg}"), color_on)
-    );
+    let mut lines = msg.lines();
+    if let Some(first) = lines.next() {
+        eprintln!(
+            "{}",
+            paint_bold(danger, &format!("!!! [ERROR] !!! {first}"), color_on)
+        );
+        for rest in lines {
+            eprintln!("{rest}");
+        }
+    }
 }
 
 fn print_warn(theme: &ThemeConfig, msg: &str, color_on: bool) {
-    eprintln!(
-        "{}",
-        paint_bold(
-            theme.warning_color(),
-            &format!("??? [WARN] ??? {msg}"),
-            color_on
-        )
-    );
+    let mut lines = msg.lines();
+    if let Some(first) = lines.next() {
+        eprintln!(
+            "{}",
+            paint_bold(
+                theme.warning_color(),
+                &format!("??? [WARN] ??? {first}"),
+                color_on
+            )
+        );
+        for rest in lines {
+            eprintln!("{rest}");
+        }
+    }
 }
 
 fn color_to_rgb(c: Color) -> [u8; 3] {
@@ -138,8 +150,10 @@ COMMANDS:
     sync                    Flush offline queue and refresh local cache
     doctor                  Check API, companion bridge, config, and cache health
 
-ID PATTERNS:
-    Supports SQL-like dot patterns: 'G2.' (starts with G2), '._g' (ends with _g), 'G2.k_g' (G2...k_g)"#
+ID PATTERNS & MULTI-ID:
+    SQL-like dot patterns: 'G2.' (starts with G2), '._g' (ends with _g), 'G2.k_g' (G2...k_g)
+    Multi-ID selection (done, edit, schedule, rm): comma-separated ('AB1,AB2') or multiple args
+    ('AB1 AB2'). Note: multi-ID edit excludes title changes and applies metadata only."#
     );
 }
 
@@ -390,6 +404,40 @@ pub fn autocorrect_short_syntax(
     (out_tokens.join(" "), corrections)
 }
 
+fn format_conflict_rows(matches: &[&Task]) -> String {
+    let theme = AppConfig::load().theme;
+    let color_on = !cfg!(test) && std::env::var_os("NO_COLOR").is_none();
+    let shown: Vec<&Task> = matches.iter().take(5).copied().collect();
+    let mut lines = Vec::with_capacity(shown.len());
+    for (i, t) in shown.iter().enumerate() {
+        let branch = if i + 1 == shown.len() {
+            "╰─"
+        } else {
+            "├─"
+        };
+        let icon = if t.is_done {
+            paint(theme.success_color(), "✓", color_on)
+        } else {
+            paint(theme.accent_color(), "○", color_on)
+        };
+        let title = paint(
+            if t.is_done {
+                theme.muted_color()
+            } else {
+                theme.fg_color()
+            },
+            &t.title,
+            color_on,
+        );
+        let id = paint(theme.muted_color(), &format!("({})", t.id), color_on);
+        lines.push(format!(
+            "{} {icon} {title}  {id}",
+            paint(theme.border_color(), branch, color_on)
+        ));
+    }
+    lines.join("\n")
+}
+
 pub fn resolve_task<'a>(tasks: &'a [Task], query: &str) -> Result<&'a Task> {
     if let Some(exact) = tasks.iter().find(|t| t.id == query) {
         return Ok(exact);
@@ -403,14 +451,9 @@ pub fn resolve_task<'a>(tasks: &'a [Task], query: &str) -> Result<&'a Task> {
             0 => bail!("No task ID matching pattern '{query}'."),
             1 => return Ok(dot_matches[0]),
             n => {
-                let preview: Vec<String> = dot_matches
-                    .iter()
-                    .take(5)
-                    .map(|t| format!("  {}  {}", t.id, t.title))
-                    .collect();
                 bail!(
                     "ID conflict for '{query}': matched {n} tasks:\n{}",
-                    preview.join("\n")
+                    format_conflict_rows(&dot_matches)
                 );
             }
         }
@@ -419,14 +462,9 @@ pub fn resolve_task<'a>(tasks: &'a [Task], query: &str) -> Result<&'a Task> {
     match prefix_matches.len() {
         1 => return Ok(prefix_matches[0]),
         n if n > 1 => {
-            let preview: Vec<String> = prefix_matches
-                .iter()
-                .take(5)
-                .map(|t| format!("  {}  {}", t.id, t.title))
-                .collect();
             bail!(
                 "ID conflict for '{query}': matched {n} tasks:\n{}",
-                preview.join("\n")
+                format_conflict_rows(&prefix_matches)
             );
         }
         _ => {}
@@ -440,14 +478,9 @@ pub fn resolve_task<'a>(tasks: &'a [Task], query: &str) -> Result<&'a Task> {
         0 => bail!("No task matching '{query}'."),
         1 => Ok(title_matches[0]),
         n => {
-            let preview: Vec<String> = title_matches
-                .iter()
-                .take(5)
-                .map(|t| format!("  {}  {}", t.id, t.title))
-                .collect();
             bail!(
                 "ID conflict / ambiguous query '{query}' matched {n} tasks:\n{}",
-                preview.join("\n")
+                format_conflict_rows(&title_matches)
             );
         }
     }
