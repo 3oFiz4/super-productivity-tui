@@ -1,6 +1,6 @@
 [package]
 name = "super-productivity-tui"
-version = "0.1.2"
+version = "1.0.2"
 edition = "2024"
 description = "Ratatui TUI client for Super Productivity Local REST API"
 
