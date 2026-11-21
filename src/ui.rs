@@ -3,7 +3,7 @@ use crate::app::{
     FocusMode, FocusSection, HistoryTab, HistoryTimeframe, NavFilter, NavItemKind, PomodoroPhase,
     PropertiesMode, PropertiesTarget, SettingsField, ThemeEditorState, ThemePickerFocus,
 };
-use crate::config::KeybindMode;
+use crate::config::{KeybindMode, SyncMode};
 use crate::keybinds::all_keybinds;
 use crate::models::parse_hex_color;
 use crate::theme::map_coords_to_rgb;
@@ -989,7 +989,10 @@ fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(72, 18, area);
+    let st = &app.settings_state;
+    let is_ss = st.sync_mode == SyncMode::SuperSync;
+    let height = if is_ss { 21 } else { 19 };
+    let popup = centered_rect(76, height, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -1001,7 +1004,6 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let st = &app.settings_state;
     let accent = app.config.theme.accent_color();
     let fg = app.config.theme.fg_color();
     let field_style = |f: SettingsField| {
@@ -1012,15 +1014,17 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let masked_token = if st.api_token.is_empty() {
-        "<empty>".to_string()
-    } else if st.active_field == SettingsField::ApiToken {
-        st.api_token.clone()
-    } else {
-        "*".repeat(st.api_token.len().min(16))
+    let mask_secret = |val: &str, f: SettingsField| -> String {
+        if val.is_empty() {
+            "<empty>".to_string()
+        } else if st.active_field == f {
+            val.to_string()
+        } else {
+            "*".repeat(val.len().min(16))
+        }
     };
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             "CLI Settings",
             Style::default()
@@ -1029,53 +1033,104 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Line::from(""),
         Line::from(vec![
+            Span::raw("Sync Mode:     "),
+            Span::styled(
+                format!("{} (Space to switch)", st.sync_mode.label()),
+                field_style(SettingsField::SyncMode),
+            ),
+        ]),
+    ];
+
+    if is_ss {
+        lines.push(Line::from(vec![
+            Span::raw("SS URL:        "),
+            Span::styled(&st.supersync_url, field_style(SettingsField::SuperSyncUrl)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("SS Token:      "),
+            Span::styled(
+                mask_secret(&st.supersync_token, SettingsField::SuperSyncToken),
+                field_style(SettingsField::SuperSyncToken),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("SS Password:   "),
+            Span::styled(
+                mask_secret(
+                    &st.supersync_encrypt_key,
+                    SettingsField::SuperSyncEncryptKey,
+                ),
+                field_style(SettingsField::SuperSyncEncryptKey),
+            ),
+        ]));
+        let browser_hint = st
+            .browser_login_status
+            .as_deref()
+            .unwrap_or("Press Space/Enter to authorize via browser");
+        lines.push(Line::from(vec![
+            Span::raw("Browser Login: "),
+            Span::styled(
+                format!("[ Connect via Browser ] {browser_hint}"),
+                field_style(SettingsField::SuperSyncBrowserConnect),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
             Span::raw("API URL:       "),
             Span::styled(&st.api_url, field_style(SettingsField::ApiUrl)),
-        ]),
-        Line::from(vec![
+        ]));
+        lines.push(Line::from(vec![
             Span::raw("API Token:     "),
-            Span::styled(masked_token, field_style(SettingsField::ApiToken)),
-        ]),
-        Line::from(vec![
-            Span::raw("Keybind Mode:  "),
             Span::styled(
-                st.keybind_mode.label(),
-                field_style(SettingsField::KeybindMode),
+                mask_secret(&st.api_token, SettingsField::ApiToken),
+                field_style(SettingsField::ApiToken),
             ),
-        ]),
-        Line::from(vec![
-            Span::raw("Hint Keybind:  "),
-            Span::styled(
-                if st.hint_keybind { "true" } else { "false" },
-                field_style(SettingsField::HintKeybind),
-            ),
-        ]),
-        Line::from(vec![
+        ]));
+    }
+
+    lines.push(Line::from(vec![
+        Span::raw("Keybind Mode:  "),
+        Span::styled(
+            st.keybind_mode.label(),
+            field_style(SettingsField::KeybindMode),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("Hint Keybind:  "),
+        Span::styled(
+            if st.hint_keybind { "true" } else { "false" },
+            field_style(SettingsField::HintKeybind),
+        ),
+    ]));
+    if !is_ss {
+        lines.push(Line::from(vec![
             Span::raw("Bridge Port:   "),
             Span::styled(
                 format!("{} (0 = off)", st.bridge_port),
                 field_style(SettingsField::BridgePort),
             ),
-        ]),
-        Line::from(vec![
-            Span::raw("Desktop Notif: "),
-            Span::styled(
-                if st.desktop_notifications {
-                    "true"
-                } else {
-                    "false"
-                },
-                field_style(SettingsField::DesktopNotifications),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("Sound Alerts:  "),
-            Span::styled(
-                if st.sound_alerts { "true" } else { "false" },
-                field_style(SettingsField::SoundAlerts),
-            ),
-        ]),
-        Line::from(vec![
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::raw("Desktop Notif: "),
+        Span::styled(
+            if st.desktop_notifications {
+                "true"
+            } else {
+                "false"
+            },
+            field_style(SettingsField::DesktopNotifications),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("Sound Alerts:  "),
+        Span::styled(
+            if st.sound_alerts { "true" } else { "false" },
+            field_style(SettingsField::SoundAlerts),
+        ),
+    ]));
+    if !is_ss {
+        lines.push(Line::from(vec![
             Span::raw("SP Plugin:     "),
             if app.bridge.is_plugin_active() {
                 Span::styled(
@@ -1088,17 +1143,21 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(app.config.theme.muted_color()),
                 )
             },
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Note: Without SP installed, spt runs in Local mode (no sync). Install SP to enable sync.",
-            Style::default().fg(app.config.theme.accent_color()),
-        )),
-        Line::from(Span::styled(
-            "Tab/Up/Down: move | Space: toggle | Enter: save & connect | Esc: cancel",
-            Style::default().fg(app.config.theme.muted_color()),
-        )),
-    ];
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        if is_ss {
+            "SuperSync talks directly to the SuperSync server using E2EE (no desktop SP needed)."
+        } else {
+            "Note: Without SP installed, spt runs in Local mode (no sync). Or switch Sync Mode -> SuperSync."
+        },
+        Style::default().fg(app.config.theme.accent_color()),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Tab/Up/Down: move | Space: toggle | Enter: save & connect | Esc: cancel",
+        Style::default().fg(app.config.theme.muted_color()),
+    )));
 
     frame.render_widget(Paragraph::new(lines), inner);
 }

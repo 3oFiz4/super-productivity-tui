@@ -40,10 +40,42 @@ impl KeybindMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncMode {
+    #[default]
+    LocalRest,
+    SuperSync,
+}
+
+impl SyncMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::LocalRest => Self::SuperSync,
+            Self::SuperSync => Self::LocalRest,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LocalRest => "Local REST",
+            Self::SuperSync => "SuperSync",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub sync_mode: SyncMode,
     pub api_url: String,
     pub api_token: String,
+    #[serde(default = "default_supersync_url")]
+    pub supersync_url: String,
+    #[serde(default)]
+    pub supersync_token: String,
+    #[serde(default)]
+    pub supersync_encrypt_key: String,
     pub keybind_mode: KeybindMode,
     pub hint_keybind: bool,
     #[serde(default)]
@@ -66,6 +98,10 @@ pub struct AppConfig {
     pub seen_local_notice: bool,
 }
 
+fn default_supersync_url() -> String {
+    "https://sync.super-productivity.com".to_string()
+}
+
 fn default_bridge_port() -> u16 {
     3877
 }
@@ -77,8 +113,12 @@ fn default_true() -> bool {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            sync_mode: SyncMode::LocalRest,
             api_url: "http://127.0.0.1:3876".to_string(),
             api_token: String::new(),
+            supersync_url: default_supersync_url(),
+            supersync_token: String::new(),
+            supersync_encrypt_key: String::new(),
             keybind_mode: KeybindMode::Both,
             hint_keybind: true,
             theme: ThemeConfig::default(),
@@ -129,6 +169,21 @@ impl AppConfig {
             && !env_url.is_empty()
         {
             cfg.api_url = env_url;
+        }
+        if let Ok(env_ss_url) = std::env::var("SP_SUPERSYNC_URL")
+            && !env_ss_url.is_empty()
+        {
+            cfg.supersync_url = env_ss_url;
+        }
+        if cfg.supersync_token.is_empty()
+            && let Ok(env_ss_token) = std::env::var("SP_SUPERSYNC_TOKEN")
+        {
+            cfg.supersync_token = env_ss_token;
+        }
+        if cfg.supersync_encrypt_key.is_empty()
+            && let Ok(env_ss_key) = std::env::var("SP_SUPERSYNC_ENCRYPT_KEY")
+        {
+            cfg.supersync_encrypt_key = env_ss_key;
         }
         cfg
     }

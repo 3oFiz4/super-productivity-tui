@@ -1,11 +1,12 @@
 use crate::api::SuperProductivityClient;
 use crate::bridge::{BridgeAck, BridgeAction, BridgeCommand, BridgeHandle};
-use crate::config::{AppConfig, KeybindMode};
+use crate::config::{AppConfig, KeybindMode, SyncMode};
 use crate::keybinds::{JkEscapeTracker, JkResult, SequenceState};
 use crate::models::{CreateTaskPayload, Project, SimpleCounter, Tag, Task};
 use crate::offline::{
     OfflineCache, QueuedOp, apply_order, sanitize_create_payload_for_sp, sanitize_patch_for_sp,
 };
+use crate::supersync::{BrowserConnectPoll, SuperSyncClient, generate_entity_id, open_browser_url};
 use crate::theme::{ThemeConfig, format_hex, map_coords_to_rgb, parse_rgb, rgb_to_map_coords};
 use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 use crossterm::event::{
@@ -446,8 +447,13 @@ impl Default for AddTaskState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsField {
+    SyncMode,
     ApiUrl,
     ApiToken,
+    SuperSyncUrl,
+    SuperSyncToken,
+    SuperSyncEncryptKey,
+    SuperSyncBrowserConnect,
     KeybindMode,
     HintKeybind,
     BridgePort,
@@ -456,35 +462,62 @@ pub enum SettingsField {
 }
 
 impl SettingsField {
-    pub fn next(self) -> Self {
-        match self {
-            Self::ApiUrl => Self::ApiToken,
-            Self::ApiToken => Self::KeybindMode,
-            Self::KeybindMode => Self::HintKeybind,
-            Self::HintKeybind => Self::BridgePort,
-            Self::BridgePort => Self::DesktopNotifications,
-            Self::DesktopNotifications => Self::SoundAlerts,
-            Self::SoundAlerts => Self::ApiUrl,
+    pub fn next(self, mode: SyncMode) -> Self {
+        match (mode, self) {
+            (SyncMode::LocalRest, Self::SyncMode) => Self::ApiUrl,
+            (SyncMode::LocalRest, Self::ApiUrl) => Self::ApiToken,
+            (SyncMode::LocalRest, Self::ApiToken) => Self::KeybindMode,
+            (SyncMode::LocalRest, Self::KeybindMode) => Self::HintKeybind,
+            (SyncMode::LocalRest, Self::HintKeybind) => Self::BridgePort,
+            (SyncMode::LocalRest, Self::BridgePort) => Self::DesktopNotifications,
+            (SyncMode::LocalRest, Self::DesktopNotifications) => Self::SoundAlerts,
+            (SyncMode::LocalRest, Self::SoundAlerts) => Self::SyncMode,
+            (SyncMode::SuperSync, Self::SyncMode) => Self::SuperSyncUrl,
+            (SyncMode::SuperSync, Self::SuperSyncUrl) => Self::SuperSyncToken,
+            (SyncMode::SuperSync, Self::SuperSyncToken) => Self::SuperSyncEncryptKey,
+            (SyncMode::SuperSync, Self::SuperSyncEncryptKey) => Self::SuperSyncBrowserConnect,
+            (SyncMode::SuperSync, Self::SuperSyncBrowserConnect) => Self::KeybindMode,
+            (SyncMode::SuperSync, Self::KeybindMode) => Self::HintKeybind,
+            (SyncMode::SuperSync, Self::HintKeybind) => Self::DesktopNotifications,
+            (SyncMode::SuperSync, Self::DesktopNotifications) => Self::SoundAlerts,
+            (SyncMode::SuperSync, Self::SoundAlerts) => Self::SyncMode,
+            _ => Self::SyncMode,
         }
     }
 
-    pub fn prev(self) -> Self {
-        match self {
-            Self::ApiUrl => Self::SoundAlerts,
-            Self::ApiToken => Self::ApiUrl,
-            Self::KeybindMode => Self::ApiToken,
-            Self::HintKeybind => Self::KeybindMode,
-            Self::BridgePort => Self::HintKeybind,
-            Self::DesktopNotifications => Self::BridgePort,
-            Self::SoundAlerts => Self::DesktopNotifications,
+    pub fn prev(self, mode: SyncMode) -> Self {
+        match (mode, self) {
+            (SyncMode::LocalRest, Self::SyncMode) => Self::SoundAlerts,
+            (SyncMode::LocalRest, Self::ApiUrl) => Self::SyncMode,
+            (SyncMode::LocalRest, Self::ApiToken) => Self::ApiUrl,
+            (SyncMode::LocalRest, Self::KeybindMode) => Self::ApiToken,
+            (SyncMode::LocalRest, Self::HintKeybind) => Self::KeybindMode,
+            (SyncMode::LocalRest, Self::BridgePort) => Self::HintKeybind,
+            (SyncMode::LocalRest, Self::DesktopNotifications) => Self::BridgePort,
+            (SyncMode::LocalRest, Self::SoundAlerts) => Self::DesktopNotifications,
+            (SyncMode::SuperSync, Self::SyncMode) => Self::SoundAlerts,
+            (SyncMode::SuperSync, Self::SuperSyncUrl) => Self::SyncMode,
+            (SyncMode::SuperSync, Self::SuperSyncToken) => Self::SuperSyncUrl,
+            (SyncMode::SuperSync, Self::SuperSyncEncryptKey) => Self::SuperSyncToken,
+            (SyncMode::SuperSync, Self::SuperSyncBrowserConnect) => Self::SuperSyncEncryptKey,
+            (SyncMode::SuperSync, Self::KeybindMode) => Self::SuperSyncBrowserConnect,
+            (SyncMode::SuperSync, Self::HintKeybind) => Self::KeybindMode,
+            (SyncMode::SuperSync, Self::DesktopNotifications) => Self::HintKeybind,
+            (SyncMode::SuperSync, Self::SoundAlerts) => Self::DesktopNotifications,
+            _ => Self::SyncMode,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SettingsState {
+    pub sync_mode: SyncMode,
     pub api_url: String,
     pub api_token: String,
+    pub supersync_url: String,
+    pub supersync_token: String,
+    pub supersync_encrypt_key: String,
+    pub browser_login_status: Option<String>,
     pub keybind_mode: KeybindMode,
     pub hint_keybind: bool,
     pub bridge_port: String,
@@ -496,14 +529,19 @@ pub struct SettingsState {
 impl From<&AppConfig> for SettingsState {
     fn from(cfg: &AppConfig) -> Self {
         Self {
+            sync_mode: cfg.sync_mode,
             api_url: cfg.api_url.clone(),
             api_token: cfg.api_token.clone(),
+            supersync_url: cfg.supersync_url.clone(),
+            supersync_token: cfg.supersync_token.clone(),
+            supersync_encrypt_key: cfg.supersync_encrypt_key.clone(),
+            browser_login_status: None,
             keybind_mode: cfg.keybind_mode,
             hint_keybind: cfg.hint_keybind,
             bridge_port: cfg.bridge_port.to_string(),
             desktop_notifications: cfg.desktop_notifications,
             sound_alerts: cfg.sound_alerts,
-            active_field: SettingsField::ApiUrl,
+            active_field: SettingsField::SyncMode,
         }
     }
 }
@@ -734,6 +772,9 @@ pub enum ApiEvent {
         ack: BridgeAck,
     },
     MutationOfflineFallback(QueuedOp),
+    SuperSyncBrowserStatus(String),
+    SuperSyncBrowserToken(String),
+    SuperSyncBrowserError(String),
     UpdateAvailable(crate::update::ReleaseInfo),
     Error(String),
 }
@@ -750,6 +791,7 @@ pub struct UiAreas {
 pub struct App {
     pub config: AppConfig,
     pub client: SuperProductivityClient,
+    pub supersync: SuperSyncClient,
     pub should_quit: bool,
     pub focus: FocusSection,
     pub show_sidebar: bool,
@@ -829,41 +871,79 @@ pub struct App {
 impl App {
     pub fn new(config: AppConfig, api_tx: mpsc::UnboundedSender<ApiEvent>) -> Self {
         let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
+        let supersync = SuperSyncClient::new(
+            &config.supersync_url,
+            &config.supersync_token,
+            &config.supersync_encrypt_key,
+            !cfg!(test),
+        );
         let settings_state = SettingsState::from(&config);
         #[cfg(not(test))]
         let mut cache = OfflineCache::load();
         #[cfg(test)]
         let mut cache = OfflineCache::default();
-        let counters = if cache.counters.is_empty() {
-            config.counters.clone()
-        } else {
-            cache.counters.clone()
-        };
-        let mut projects = cache.projects.clone();
-        for lp in &cache.local_projects {
-            if !projects.iter().any(|p| p.id == lp.id) {
-                projects.push(lp.clone());
-            }
-        }
-        apply_order(&mut projects, &cache.project_order, |p| &p.id);
-        let mut tags = cache.tags.clone();
-        for lt in &cache.local_tags {
-            if !tags.iter().any(|t| t.id == lt.id) {
-                tags.push(lt.clone());
-            }
-        }
-        apply_order(&mut tags, &cache.tag_order, |t| &t.id);
-        let tasks = std::mem::take(&mut cache.tasks);
-        let current_task_id = cache.current_task_id.clone();
-        cache.tasks = tasks.clone();
-        let initial_conn = if crate::config::is_sp_installed() {
-            ConnectionState::Offline
-        } else {
-            ConnectionState::Local
-        };
+
+        let (tasks, projects, tags, counters, current_task_id, initial_conn) =
+            if config.sync_mode == SyncMode::SuperSync {
+                let snap = supersync.try_cached_snapshot();
+                let counters = snap
+                    .as_ref()
+                    .filter(|s| !s.counters.is_empty())
+                    .map(|s| s.counters.clone())
+                    .unwrap_or_else(|| config.counters.clone());
+                let (tasks, projects, tags, current_task_id) = match snap {
+                    Some(s) => (s.tasks, s.projects, s.tags, s.current_task_id),
+                    None => (Vec::new(), Vec::new(), Vec::new(), None),
+                };
+                (
+                    tasks,
+                    projects,
+                    tags,
+                    counters,
+                    current_task_id,
+                    ConnectionState::Offline,
+                )
+            } else {
+                let counters = if cache.counters.is_empty() {
+                    config.counters.clone()
+                } else {
+                    cache.counters.clone()
+                };
+                let mut projects = cache.projects.clone();
+                for lp in &cache.local_projects {
+                    if !projects.iter().any(|p| p.id == lp.id) {
+                        projects.push(lp.clone());
+                    }
+                }
+                apply_order(&mut projects, &cache.project_order, |p| &p.id);
+                let mut tags = cache.tags.clone();
+                for lt in &cache.local_tags {
+                    if !tags.iter().any(|t| t.id == lt.id) {
+                        tags.push(lt.clone());
+                    }
+                }
+                apply_order(&mut tags, &cache.tag_order, |t| &t.id);
+                let tasks = std::mem::take(&mut cache.tasks);
+                let current_task_id = cache.current_task_id.clone();
+                cache.tasks = tasks.clone();
+                let initial_conn = if crate::config::is_sp_installed() {
+                    ConnectionState::Offline
+                } else {
+                    ConnectionState::Local
+                };
+                (
+                    tasks,
+                    projects,
+                    tags,
+                    counters,
+                    current_task_id,
+                    initial_conn,
+                )
+            };
         Self {
             config,
             client,
+            supersync,
             should_quit: false,
             focus: FocusSection::Main,
             show_sidebar: true,
@@ -935,7 +1015,14 @@ impl App {
         }
     }
 
+    pub fn is_supersync(&self) -> bool {
+        self.config.sync_mode == SyncMode::SuperSync
+    }
+
     pub fn save_cache(&mut self) {
+        if self.is_supersync() {
+            return;
+        }
         self.offline_cache.tasks = self.tasks.clone();
         self.offline_cache.projects = self
             .projects
@@ -985,6 +1072,39 @@ impl App {
         self.sync_in_flight = true;
         self.conn_state = ConnectionState::Syncing;
         self.last_sync_at = Instant::now();
+
+        if self.is_supersync() {
+            let ss = self.supersync.clone();
+            let tx = self.api_tx.clone();
+            let current_task_id = self.current_task_id.clone();
+            tokio::spawn(async move {
+                match ss.sync_cycle().await {
+                    Ok(snap) => {
+                        let _ = tx.send(ApiEvent::Loaded {
+                            tasks: snap.tasks,
+                            projects: snap.projects,
+                            tags: snap.tags,
+                            counters: (!snap.counters.is_empty()).then_some(snap.counters),
+                            current_task_id,
+                            connected: true,
+                            message: snap.message,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ApiEvent::Loaded {
+                            tasks: Vec::new(),
+                            projects: Vec::new(),
+                            tags: Vec::new(),
+                            counters: None,
+                            current_task_id,
+                            connected: false,
+                            message: format!("SuperSync: {e}"),
+                        });
+                    }
+                }
+            });
+            return;
+        }
 
         let pending = std::mem::take(&mut self.offline_cache.pending_ops);
         if pending.is_empty() {
@@ -1068,6 +1188,106 @@ impl App {
 
     pub fn refresh_all(&mut self) {
         self.sync_with_replay();
+    }
+
+    fn apply_settings_and_reconnect(&mut self) {
+        self.config.sync_mode = self.settings_state.sync_mode;
+        self.config.api_url = self.settings_state.api_url.clone();
+        self.config.api_token = self.settings_state.api_token.clone();
+        self.config.supersync_url = self.settings_state.supersync_url.clone();
+        self.config.supersync_token = self.settings_state.supersync_token.clone();
+        self.config.supersync_encrypt_key = self.settings_state.supersync_encrypt_key.clone();
+        self.config.keybind_mode = self.settings_state.keybind_mode;
+        self.config.hint_keybind = self.settings_state.hint_keybind;
+        self.config.desktop_notifications = self.settings_state.desktop_notifications;
+        self.config.sound_alerts = self.settings_state.sound_alerts;
+        if let Ok(port) = self.settings_state.bridge_port.trim().parse::<u16>() {
+            self.config.bridge_port = port;
+        }
+        let _ = self.config.save();
+        self.client
+            .update_credentials(&self.config.api_url, &self.config.api_token);
+        self.active_modal = ActiveModal::None;
+
+        if self.is_supersync() {
+            if self.sync_in_flight {
+                return;
+            }
+            self.sync_in_flight = true;
+            self.conn_state = ConnectionState::Syncing;
+            self.last_sync_at = Instant::now();
+            let ss = self.supersync.clone();
+            let tx = self.api_tx.clone();
+            let url = self.config.supersync_url.clone();
+            let tok = self.config.supersync_token.clone();
+            let enc = self.config.supersync_encrypt_key.clone();
+            let current_task_id = self.current_task_id.clone();
+            tokio::spawn(async move {
+                ss.update_credentials(&url, &tok, &enc).await;
+                push_supersync_cycle(&ss, &tx, current_task_id).await;
+            });
+        } else {
+            self.refresh_all();
+        }
+    }
+
+    fn start_supersync_browser_login(&mut self) {
+        let ss = self.supersync.clone();
+        let tx = self.api_tx.clone();
+        let url = self.settings_state.supersync_url.clone();
+        let tok = self.settings_state.supersync_token.clone();
+        let enc = self.settings_state.supersync_encrypt_key.clone();
+        self.settings_state.browser_login_status =
+            Some("Opening browser for SuperSync login...".to_string());
+        tokio::spawn(async move {
+            ss.update_credentials(&url, &tok, &enc).await;
+            match ss.start_browser_connect().await {
+                Ok(ticket) => {
+                    open_browser_url(&ticket.login_url);
+                    let _ = tx.send(ApiEvent::SuperSyncBrowserStatus(format!(
+                        "Approve code {} in browser ({})",
+                        ticket.match_code, ticket.login_url
+                    )));
+                    let interval = Duration::from_millis(ticket.poll_interval_ms.max(1500));
+                    for _ in 0..120 {
+                        tokio::time::sleep(interval).await;
+                        match ss.poll_browser_connect(&ticket).await {
+                            Ok(BrowserConnectPoll::Pending) => continue,
+                            Ok(BrowserConnectPoll::Approved(new_token)) => {
+                                let _ = tx.send(ApiEvent::SuperSyncBrowserToken(new_token));
+                                return;
+                            }
+                            Ok(BrowserConnectPoll::Denied) => {
+                                let _ = tx.send(ApiEvent::SuperSyncBrowserError(
+                                    "Browser sign-in was denied".to_string(),
+                                ));
+                                return;
+                            }
+                            Ok(BrowserConnectPoll::Expired) => {
+                                let _ = tx.send(ApiEvent::SuperSyncBrowserError(
+                                    "Browser sign-in expired — try again".to_string(),
+                                ));
+                                return;
+                            }
+                            Err(e) => {
+                                let _ = tx.send(ApiEvent::SuperSyncBrowserError(format!(
+                                    "Poll error: {e}"
+                                )));
+                                return;
+                            }
+                        }
+                    }
+                    let _ = tx.send(ApiEvent::SuperSyncBrowserError(
+                        "Browser sign-in timed out".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    let _ = tx.send(ApiEvent::SuperSyncBrowserError(format!(
+                        "Browser connect failed: {e}"
+                    )));
+                }
+            }
+        });
     }
 
     pub fn check_for_updates(&self) {
@@ -1173,39 +1393,45 @@ impl App {
             } => {
                 self.sync_in_flight = false;
                 self.connected = connected;
+                let supersync = self.is_supersync();
                 self.conn_state = if connected {
                     ConnectionState::Online
-                } else if crate::config::is_sp_installed() {
+                } else if supersync || crate::config::is_sp_installed() {
                     ConnectionState::Offline
                 } else {
                     ConnectionState::Local
                 };
-                if self.conn_state == ConnectionState::Local {
+                if !supersync && self.conn_state == ConnectionState::Local {
                     self.maybe_trigger_local_notice();
                 }
                 if connected {
                     self.tasks = tasks;
-                    let mut merged_projects = projects;
-                    for lp in &self.offline_cache.local_projects {
-                        if !merged_projects.iter().any(|p| p.id == lp.id) {
-                            merged_projects.push(lp.clone());
+                    if supersync {
+                        self.projects = projects;
+                        self.tags = tags;
+                    } else {
+                        let mut merged_projects = projects;
+                        for lp in &self.offline_cache.local_projects {
+                            if !merged_projects.iter().any(|p| p.id == lp.id) {
+                                merged_projects.push(lp.clone());
+                            }
                         }
-                    }
-                    apply_order(
-                        &mut merged_projects,
-                        &self.offline_cache.project_order,
-                        |p| &p.id,
-                    );
-                    self.projects = merged_projects;
+                        apply_order(
+                            &mut merged_projects,
+                            &self.offline_cache.project_order,
+                            |p| &p.id,
+                        );
+                        self.projects = merged_projects;
 
-                    let mut merged_tags = tags;
-                    for lt in &self.offline_cache.local_tags {
-                        if !merged_tags.iter().any(|t| t.id == lt.id) {
-                            merged_tags.push(lt.clone());
+                        let mut merged_tags = tags;
+                        for lt in &self.offline_cache.local_tags {
+                            if !merged_tags.iter().any(|t| t.id == lt.id) {
+                                merged_tags.push(lt.clone());
+                            }
                         }
+                        apply_order(&mut merged_tags, &self.offline_cache.tag_order, |t| &t.id);
+                        self.tags = merged_tags;
                     }
-                    apply_order(&mut merged_tags, &self.offline_cache.tag_order, |t| &t.id);
-                    self.tags = merged_tags;
 
                     if let Some(c) = counters {
                         self.counters = c;
@@ -1231,15 +1457,32 @@ impl App {
                     self.sync_with_replay();
                 } else if !is_up {
                     self.connected = false;
-                    self.conn_state = if crate::config::is_sp_installed() {
+                    self.conn_state = if self.is_supersync() || crate::config::is_sp_installed() {
                         ConnectionState::Offline
                     } else {
                         ConnectionState::Local
                     };
-                    if self.conn_state == ConnectionState::Local {
+                    if !self.is_supersync() && self.conn_state == ConnectionState::Local {
                         self.maybe_trigger_local_notice();
                     }
                 }
+            }
+            ApiEvent::SuperSyncBrowserStatus(msg) => {
+                self.settings_state.browser_login_status = Some(msg.clone());
+                self.status_message = msg;
+            }
+            ApiEvent::SuperSyncBrowserToken(tok) => {
+                self.settings_state.supersync_token = tok.clone();
+                self.settings_state.browser_login_status = Some(
+                    "Authorized! Press Enter to save & connect (or set SS Password)".to_string(),
+                );
+                self.config.supersync_token = tok;
+                let _ = self.config.save();
+                self.status_message = "SuperSync token received from browser".to_string();
+            }
+            ApiEvent::SuperSyncBrowserError(err) => {
+                self.settings_state.browser_login_status = Some(err.clone());
+                self.status_message = err;
             }
             ApiEvent::ReplayFinished {
                 replayed,
@@ -1715,22 +1958,33 @@ impl App {
                 }
             }
         }
-        if !self.health_check_in_flight
-            && !self.sync_in_flight
-            && self.last_health_check_at.elapsed() >= Duration::from_secs(2)
-        {
-            self.health_check_in_flight = true;
-            self.last_health_check_at = Instant::now();
-            let client = self.client.clone();
-            let tx = self.api_tx.clone();
-            tokio::spawn(async move {
-                let is_up = !crate::config::force_no_sp()
-                    && matches!(
-                        client.health().await,
-                        Ok(h) if h.server == "up" && h.renderer_ready
-                    );
-                let _ = tx.send(ApiEvent::HealthCheck(is_up));
-            });
+        if !self.health_check_in_flight && !self.sync_in_flight {
+            if self.is_supersync() {
+                if !self.connected && self.last_health_check_at.elapsed() >= Duration::from_secs(10)
+                {
+                    self.health_check_in_flight = true;
+                    self.last_health_check_at = Instant::now();
+                    let ss = self.supersync.clone();
+                    let tx = self.api_tx.clone();
+                    tokio::spawn(async move {
+                        let is_up = ss.is_configured().await && ss.status().await.is_ok();
+                        let _ = tx.send(ApiEvent::HealthCheck(is_up));
+                    });
+                }
+            } else if self.last_health_check_at.elapsed() >= Duration::from_secs(2) {
+                self.health_check_in_flight = true;
+                self.last_health_check_at = Instant::now();
+                let client = self.client.clone();
+                let tx = self.api_tx.clone();
+                tokio::spawn(async move {
+                    let is_up = !crate::config::force_no_sp()
+                        && matches!(
+                            client.health().await,
+                            Ok(h) if h.server == "up" && h.renderer_ready
+                        );
+                    let _ = tx.send(ApiEvent::HealthCheck(is_up));
+                });
+            }
         }
 
         if self.connected
@@ -2615,30 +2869,7 @@ impl App {
                     if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task.id) {
                         t.is_done = next_done;
                     }
-                    if !self.connected || task.id.starts_with("offline-task-") {
-                        self.enqueue_offline_op(QueuedOp::UpdateTask {
-                            id: task.id,
-                            patch: json!({ "isDone": next_done }),
-                        });
-                    } else {
-                        let client = self.client.clone();
-                        let tx = self.api_tx.clone();
-                        tokio::spawn(async move {
-                            match client.toggle_done(&task.id, next_done).await {
-                                Ok(t) => {
-                                    let _ = tx.send(ApiEvent::TaskUpdated(t));
-                                }
-                                Err(_) => {
-                                    let _ = tx.send(ApiEvent::MutationOfflineFallback(
-                                        QueuedOp::UpdateTask {
-                                            id: task.id,
-                                            patch: json!({ "isDone": next_done }),
-                                        },
-                                    ));
-                                }
-                            }
-                        });
-                    }
+                    self.spawn_patch(task.id, json!({ "isDone": next_done }));
                 }
             }
         }
@@ -2917,6 +3148,20 @@ impl App {
             return;
         }
         self.projects.retain(|p| p.id != pid);
+        if self.is_supersync() {
+            self.tasks
+                .retain(|t| t.project_id.as_deref() != Some(pid.as_str()));
+            self.clamp_selections();
+            let ss = self.supersync.clone();
+            let tx = self.api_tx.clone();
+            let cur = self.current_task_id.clone();
+            self.status_message = "Project deleted (syncing...)".to_string();
+            tokio::spawn(async move {
+                ss.delete_project_op(&pid).await;
+                push_supersync_cycle(&ss, &tx, cur).await;
+            });
+            return;
+        }
         self.offline_cache.local_projects.retain(|p| p.id != pid);
         self.save_cache();
         self.clamp_selections();
@@ -2948,6 +3193,21 @@ impl App {
 
     fn delete_tag_by_id(&mut self, tid: String) {
         self.tags.retain(|t| t.id != tid);
+        if self.is_supersync() {
+            for t in &mut self.tasks {
+                t.tag_ids.retain(|id| id != &tid);
+            }
+            self.clamp_selections();
+            let ss = self.supersync.clone();
+            let tx = self.api_tx.clone();
+            let cur = self.current_task_id.clone();
+            self.status_message = "Tag deleted (syncing...)".to_string();
+            tokio::spawn(async move {
+                ss.delete_tag_op(&tid).await;
+                push_supersync_cycle(&ss, &tx, cur).await;
+            });
+            return;
+        }
         self.offline_cache.local_tags.retain(|t| t.id != tid);
         self.save_cache();
         self.clamp_selections();
@@ -2986,25 +3246,7 @@ impl App {
             });
             self.tasks.retain(|t| t.id != task.id);
             self.clamp_selections();
-            if !self.connected || task.id.starts_with("offline-task-") {
-                self.enqueue_offline_op(QueuedOp::DeleteTask { id: task.id });
-            } else {
-                let client = self.client.clone();
-                let tx = self.api_tx.clone();
-                tokio::spawn(async move {
-                    match client.delete_task(&task.id).await {
-                        Ok(()) => {
-                            let _ = tx.send(ApiEvent::TaskDeleted(task.id));
-                        }
-                        Err(_) => {
-                            let _ =
-                                tx.send(ApiEvent::MutationOfflineFallback(QueuedOp::DeleteTask {
-                                    id: task.id,
-                                }));
-                        }
-                    }
-                });
-            }
+            self.spawn_delete(task.id);
         }
     }
 
@@ -3019,6 +3261,13 @@ impl App {
         };
         self.timer_started_at = next_id.as_ref().map(|_| Instant::now());
         self.current_task_id = next_id.clone();
+        if self.is_supersync() {
+            let ss = self.supersync.clone();
+            tokio::spawn(async move {
+                ss.set_current_task_local(next_id).await;
+            });
+            return;
+        }
         if !self.connected {
             self.enqueue_offline_op(QueuedOp::SetCurrentTask { task_id: next_id });
         } else {
@@ -3184,6 +3433,16 @@ impl App {
     }
 
     fn spawn_patch(&mut self, id: String, patch: serde_json::Value) {
+        if self.is_supersync() {
+            let ss = self.supersync.clone();
+            let tx = self.api_tx.clone();
+            let cur = self.current_task_id.clone();
+            tokio::spawn(async move {
+                ss.update_task_op(&id, patch).await;
+                push_supersync_cycle(&ss, &tx, cur).await;
+            });
+            return;
+        }
         if !self.connected || id.starts_with("offline-task-") {
             self.enqueue_offline_op(QueuedOp::UpdateTask { id, patch });
             return;
@@ -3211,6 +3470,53 @@ impl App {
     }
 
     fn spawn_create(&mut self, payload: CreateTaskPayload, to_top: bool, record_undo: bool) {
+        if self.is_supersync() {
+            let id = generate_entity_id();
+            let task = Task {
+                id: id.clone(),
+                title: payload.title.clone(),
+                is_done: false,
+                notes: payload.notes.clone(),
+                project_id: payload.project_id.clone().filter(|p| !p.is_empty()),
+                parent_id: payload.parent_id.clone(),
+                tag_ids: payload
+                    .tag_ids
+                    .iter()
+                    .filter(|t| *t != "TODAY")
+                    .cloned()
+                    .collect(),
+                due_day: payload.due_day.clone(),
+                deadline_day: payload.deadline_day.clone(),
+                remind_at: None,
+                done_on: None,
+                time_estimate: payload.time_estimate,
+                time_spent: payload.time_spent,
+                repeat_cfg_id: None,
+            };
+            if record_undo {
+                self.push_undo(UndoOp::CreateTask {
+                    task: task.clone(),
+                    to_top,
+                });
+            } else if let Some(UndoOp::DeleteTask { task: dt, .. }) = self.redo_stack.last_mut() {
+                dt.id = id.clone();
+            }
+            if to_top {
+                self.tasks.insert(0, task);
+                self.task_selected = 0;
+            } else {
+                self.tasks.push(task);
+            }
+            self.clamp_selections();
+            let ss = self.supersync.clone();
+            let tx = self.api_tx.clone();
+            let cur = self.current_task_id.clone();
+            tokio::spawn(async move {
+                ss.create_task_op(id, payload, to_top).await;
+                push_supersync_cycle(&ss, &tx, cur).await;
+            });
+            return;
+        }
         if !self.connected {
             let temp_id = format!("offline-task-{}", Local::now().timestamp_millis());
             let task = Task {
@@ -3294,6 +3600,16 @@ impl App {
     }
 
     fn spawn_delete(&mut self, id: String) {
+        if self.is_supersync() {
+            let ss = self.supersync.clone();
+            let tx = self.api_tx.clone();
+            let cur = self.current_task_id.clone();
+            tokio::spawn(async move {
+                ss.delete_task_op(&id).await;
+                push_supersync_cycle(&ss, &tx, cur).await;
+            });
+            return;
+        }
         if !self.connected || id.starts_with("offline-task-") {
             self.enqueue_offline_op(QueuedOp::DeleteTask { id });
             return;
@@ -3837,30 +4153,22 @@ impl App {
                 }
 
                 let patch = serde_json::Value::Object(patch_map);
-                if !self.connected || id.starts_with("offline-task-") {
-                    self.enqueue_offline_op(QueuedOp::UpdateTask { id, patch });
-                } else {
-                    let patch_fallback = patch.clone();
-                    tokio::spawn(async move {
-                        match client.update_task(&id, patch).await {
-                            Ok(t) => {
-                                let _ = tx.send(ApiEvent::TaskUpdated(t));
-                            }
-                            Err(_) => {
-                                let _ = tx.send(ApiEvent::MutationOfflineFallback(
-                                    QueuedOp::UpdateTask {
-                                        id,
-                                        patch: patch_fallback,
-                                    },
-                                ));
-                            }
-                        }
-                    });
-                }
+                self.spawn_patch(id, patch);
             }
             RenameTarget::Project(id) => {
                 if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
                     p.title = new_title.clone();
+                }
+                if self.is_supersync() {
+                    let ss = self.supersync.clone();
+                    let tx = self.api_tx.clone();
+                    let cur = self.current_task_id.clone();
+                    self.status_message = "Project renamed (syncing...)".to_string();
+                    tokio::spawn(async move {
+                        ss.rename_project_op(&id, &new_title).await;
+                        push_supersync_cycle(&ss, &tx, cur).await;
+                    });
+                    return;
                 }
                 self.save_cache();
                 self.bridge.enqueue(BridgeAction::UpdateProject {
@@ -3891,6 +4199,17 @@ impl App {
             RenameTarget::Tag(id) => {
                 if let Some(t) = self.tags.iter_mut().find(|t| t.id == id) {
                     t.title = new_title.clone();
+                }
+                if self.is_supersync() {
+                    let ss = self.supersync.clone();
+                    let tx = self.api_tx.clone();
+                    let cur = self.current_task_id.clone();
+                    self.status_message = "Tag renamed (syncing...)".to_string();
+                    tokio::spawn(async move {
+                        ss.rename_tag_op(&id, &new_title).await;
+                        push_supersync_cycle(&ss, &tx, cur).await;
+                    });
+                    return;
                 }
                 self.save_cache();
                 self.bridge.enqueue(BridgeAction::UpdateTag {
@@ -3983,36 +4302,43 @@ impl App {
                 SettingsField::ApiToken => {
                     self.settings_state.api_token.pop();
                 }
+                SettingsField::SuperSyncUrl => {
+                    self.settings_state.supersync_url.pop();
+                }
+                SettingsField::SuperSyncToken => {
+                    self.settings_state.supersync_token.pop();
+                }
+                SettingsField::SuperSyncEncryptKey => {
+                    self.settings_state.supersync_encrypt_key.pop();
+                }
                 _ => {}
             }
             self.active_modal = ActiveModal::None;
             return;
         }
+        let mode = self.settings_state.sync_mode;
         match key.code {
             KeyCode::Esc => self.active_modal = ActiveModal::None,
             KeyCode::Tab | KeyCode::Down => {
-                self.settings_state.active_field = self.settings_state.active_field.next();
+                self.settings_state.active_field = self.settings_state.active_field.next(mode);
             }
             KeyCode::BackTab | KeyCode::Up => {
-                self.settings_state.active_field = self.settings_state.active_field.prev();
+                self.settings_state.active_field = self.settings_state.active_field.prev(mode);
             }
             KeyCode::Enter => {
-                self.config.api_url = self.settings_state.api_url.clone();
-                self.config.api_token = self.settings_state.api_token.clone();
-                self.config.keybind_mode = self.settings_state.keybind_mode;
-                self.config.hint_keybind = self.settings_state.hint_keybind;
-                self.config.desktop_notifications = self.settings_state.desktop_notifications;
-                self.config.sound_alerts = self.settings_state.sound_alerts;
-                if let Ok(port) = self.settings_state.bridge_port.trim().parse::<u16>() {
-                    self.config.bridge_port = port;
+                if self.settings_state.active_field == SettingsField::SuperSyncBrowserConnect {
+                    self.start_supersync_browser_login();
+                } else {
+                    self.apply_settings_and_reconnect();
                 }
-                let _ = self.config.save();
-                self.client
-                    .update_credentials(&self.config.api_url, &self.config.api_token);
-                self.active_modal = ActiveModal::None;
-                self.refresh_all();
             }
             KeyCode::Char(' ') => match self.settings_state.active_field {
+                SettingsField::SyncMode => {
+                    self.settings_state.sync_mode = self.settings_state.sync_mode.next();
+                }
+                SettingsField::SuperSyncBrowserConnect => {
+                    self.start_supersync_browser_login();
+                }
                 SettingsField::KeybindMode => {
                     self.settings_state.keybind_mode = self.settings_state.keybind_mode.next();
                 }
@@ -4028,6 +4354,11 @@ impl App {
                 }
                 SettingsField::ApiUrl => self.settings_state.api_url.push(' '),
                 SettingsField::ApiToken => self.settings_state.api_token.push(' '),
+                SettingsField::SuperSyncUrl => self.settings_state.supersync_url.push(' '),
+                SettingsField::SuperSyncToken => self.settings_state.supersync_token.push(' '),
+                SettingsField::SuperSyncEncryptKey => {
+                    self.settings_state.supersync_encrypt_key.push(' ')
+                }
                 SettingsField::BridgePort => {}
             },
             KeyCode::Backspace => match self.settings_state.active_field {
@@ -4037,14 +4368,32 @@ impl App {
                 SettingsField::ApiToken => {
                     self.settings_state.api_token.pop();
                 }
+                SettingsField::SuperSyncUrl => {
+                    self.settings_state.supersync_url.pop();
+                }
+                SettingsField::SuperSyncToken => {
+                    self.settings_state.supersync_token.pop();
+                }
+                SettingsField::SuperSyncEncryptKey => {
+                    self.settings_state.supersync_encrypt_key.pop();
+                }
                 SettingsField::BridgePort => {
                     self.settings_state.bridge_port.pop();
                 }
                 _ => {}
             },
             KeyCode::Char(c) => match self.settings_state.active_field {
+                SettingsField::SyncMode => {
+                    self.settings_state.sync_mode = self.settings_state.sync_mode.next();
+                }
                 SettingsField::ApiUrl => self.settings_state.api_url.push(c),
                 SettingsField::ApiToken => self.settings_state.api_token.push(c),
+                SettingsField::SuperSyncUrl => self.settings_state.supersync_url.push(c),
+                SettingsField::SuperSyncToken => self.settings_state.supersync_token.push(c),
+                SettingsField::SuperSyncEncryptKey => {
+                    self.settings_state.supersync_encrypt_key.push(c);
+                }
+                SettingsField::SuperSyncBrowserConnect => {}
                 SettingsField::BridgePort if c.is_ascii_digit() => {
                     self.settings_state.bridge_port.push(c);
                 }
@@ -4665,6 +5014,17 @@ impl App {
                                     primary: Some(color.clone()),
                                 });
                             }
+                            if self.is_supersync() {
+                                let ss = self.supersync.clone();
+                                let tx = self.api_tx.clone();
+                                let cur = self.current_task_id.clone();
+                                self.status_message = "Project updated (syncing...)".to_string();
+                                tokio::spawn(async move {
+                                    ss.update_project_color_title_op(&id, &title, &color).await;
+                                    push_supersync_cycle(&ss, &tx, cur).await;
+                                });
+                                return;
+                            }
                             self.save_cache();
                             self.bridge.enqueue(BridgeAction::UpdateProject {
                                 id,
@@ -4682,6 +5042,17 @@ impl App {
                                 t.title = title.clone();
                                 t.color = Some(color.clone());
                             }
+                            if self.is_supersync() {
+                                let ss = self.supersync.clone();
+                                let tx = self.api_tx.clone();
+                                let cur = self.current_task_id.clone();
+                                self.status_message = "Tag updated (syncing...)".to_string();
+                                tokio::spawn(async move {
+                                    ss.update_tag_color_title_op(&id, &title, &color).await;
+                                    push_supersync_cycle(&ss, &tx, cur).await;
+                                });
+                                return;
+                            }
                             self.save_cache();
                             self.bridge.enqueue(BridgeAction::UpdateTag {
                                 id,
@@ -4695,6 +5066,50 @@ impl App {
                             };
                         }
                     }
+                    return;
+                }
+
+                if self.is_supersync() {
+                    let id = generate_entity_id();
+                    match kind {
+                        AddEntityKind::Project => {
+                            let proj = Project {
+                                id: id.clone(),
+                                title: title.clone(),
+                                theme: Some(crate::models::EntityTheme {
+                                    primary: Some(color.clone()),
+                                }),
+                                color: None,
+                            };
+                            self.projects.push(proj);
+                            let ss = self.supersync.clone();
+                            let tx = self.api_tx.clone();
+                            let cur = self.current_task_id.clone();
+                            self.status_message = "Project created (syncing...)".to_string();
+                            tokio::spawn(async move {
+                                ss.create_project_op(id, &title, &color).await;
+                                push_supersync_cycle(&ss, &tx, cur).await;
+                            });
+                        }
+                        AddEntityKind::Tag => {
+                            let tag = Tag {
+                                id: id.clone(),
+                                title: title.clone(),
+                                color: Some(color.clone()),
+                                theme: None,
+                            };
+                            self.tags.push(tag);
+                            let ss = self.supersync.clone();
+                            let tx = self.api_tx.clone();
+                            let cur = self.current_task_id.clone();
+                            self.status_message = "Tag created (syncing...)".to_string();
+                            tokio::spawn(async move {
+                                ss.create_tag_op(id, &title, &color).await;
+                                push_supersync_cycle(&ss, &tx, cur).await;
+                            });
+                        }
+                    }
+                    self.clamp_selections();
                     return;
                 }
 
@@ -4910,15 +5325,25 @@ impl App {
                 if let Some(c) = self.counters.get_mut(self.counters_state.selected) {
                     c.count = 0;
                     let id = c.id.clone();
-                    self.config.counters = self.counters.clone();
-                    let _ = self.config.save();
-                    let client = self.client.clone();
-                    let tx = self.api_tx.clone();
-                    tokio::spawn(async move {
-                        if let Ok(updated) = client.update_counter(&id, 0).await {
-                            let _ = tx.send(ApiEvent::CounterUpdated(updated));
-                        }
-                    });
+                    if self.is_supersync() {
+                        let ss = self.supersync.clone();
+                        let tx = self.api_tx.clone();
+                        let cur = self.current_task_id.clone();
+                        tokio::spawn(async move {
+                            ss.set_counter_today_op(&id, 0).await;
+                            push_supersync_cycle(&ss, &tx, cur).await;
+                        });
+                    } else {
+                        self.config.counters = self.counters.clone();
+                        let _ = self.config.save();
+                        let client = self.client.clone();
+                        let tx = self.api_tx.clone();
+                        tokio::spawn(async move {
+                            if let Ok(updated) = client.update_counter(&id, 0).await {
+                                let _ = tx.send(ApiEvent::CounterUpdated(updated));
+                            }
+                        });
+                    }
                 }
             }
             _ => {}
@@ -4930,15 +5355,25 @@ impl App {
             c.count = (c.count + delta).max(0);
             let id = c.id.clone();
             let count = c.count;
-            self.config.counters = self.counters.clone();
-            let _ = self.config.save();
-            let client = self.client.clone();
-            let tx = self.api_tx.clone();
-            tokio::spawn(async move {
-                if let Ok(updated) = client.update_counter(&id, count).await {
-                    let _ = tx.send(ApiEvent::CounterUpdated(updated));
-                }
-            });
+            if self.is_supersync() {
+                let ss = self.supersync.clone();
+                let tx = self.api_tx.clone();
+                let cur = self.current_task_id.clone();
+                tokio::spawn(async move {
+                    ss.set_counter_today_op(&id, count).await;
+                    push_supersync_cycle(&ss, &tx, cur).await;
+                });
+            } else {
+                self.config.counters = self.counters.clone();
+                let _ = self.config.save();
+                let client = self.client.clone();
+                let tx = self.api_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(updated) = client.update_counter(&id, count).await {
+                        let _ = tx.send(ApiEvent::CounterUpdated(updated));
+                    }
+                });
+            }
         }
     }
 
@@ -4968,10 +5403,17 @@ impl App {
                     {
                         self.current_task_id = Some(tid.clone());
                         self.timer_started_at = Some(Instant::now());
-                        let client = self.client.clone();
-                        tokio::spawn(async move {
-                            let _ = client.set_current_task(Some(&tid)).await;
-                        });
+                        if self.is_supersync() {
+                            let ss = self.supersync.clone();
+                            tokio::spawn(async move {
+                                ss.set_current_task_local(Some(tid)).await;
+                            });
+                        } else {
+                            let client = self.client.clone();
+                            tokio::spawn(async move {
+                                let _ = client.set_current_task(Some(&tid)).await;
+                            });
+                        }
                     }
                 } else {
                     self.pomodoro.last_tick = None;
@@ -5167,6 +5609,37 @@ pub fn fuzzy_match(haystack: &str, needle: &str) -> bool {
     false
 }
 
+async fn push_supersync_cycle(
+    ss: &SuperSyncClient,
+    tx: &mpsc::UnboundedSender<ApiEvent>,
+    current_task_id: Option<String>,
+) {
+    match ss.sync_cycle().await {
+        Ok(snap) => {
+            let _ = tx.send(ApiEvent::Loaded {
+                tasks: snap.tasks,
+                projects: snap.projects,
+                tags: snap.tags,
+                counters: (!snap.counters.is_empty()).then_some(snap.counters),
+                current_task_id,
+                connected: true,
+                message: snap.message,
+            });
+        }
+        Err(e) => {
+            let _ = tx.send(ApiEvent::Loaded {
+                tasks: Vec::new(),
+                projects: Vec::new(),
+                tags: Vec::new(),
+                counters: None,
+                current_task_id,
+                connected: false,
+                message: format!("SuperSync: {e}"),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5325,6 +5798,40 @@ mod tests {
             app.conn_state,
             ConnectionState::Offline | ConnectionState::Local
         ));
+    }
+
+    #[tokio::test]
+    async fn supersync_settings_toggle_and_navigation_skip_local_fields() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        assert_eq!(app.config.sync_mode, SyncMode::LocalRest);
+
+        app.settings_state = SettingsState::from(&app.config);
+        app.active_modal = ActiveModal::Settings;
+        assert_eq!(app.settings_state.active_field, SettingsField::SyncMode);
+
+        // Toggle SyncMode -> SuperSync
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.settings_state.sync_mode, SyncMode::SuperSync);
+
+        // Next visits SuperSync fields, skipping ApiUrl/ApiToken/BridgePort
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.settings_state.active_field, SettingsField::SuperSyncUrl);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.settings_state.active_field,
+            SettingsField::SuperSyncToken
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.settings_state.active_field,
+            SettingsField::SuperSyncEncryptKey
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.settings_state.active_field,
+            SettingsField::SuperSyncBrowserConnect
+        );
     }
 
     #[tokio::test]

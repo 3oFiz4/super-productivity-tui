@@ -132,6 +132,7 @@ impl SuperProductivityClient {
         Self::parse_response(resp).await
     }
 
+    #[allow(dead_code)]
     pub async fn toggle_done(&self, id: &str, is_done: bool) -> Result<Task> {
         self.update_task(id, json!({ "isDone": is_done })).await
     }

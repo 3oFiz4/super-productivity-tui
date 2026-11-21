@@ -8,6 +8,7 @@ mod models;
 mod notify;
 mod offline;
 mod short_syntax;
+mod supersync;
 mod theme;
 mod ui;
 mod update;

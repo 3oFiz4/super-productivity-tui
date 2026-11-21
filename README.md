@@ -54,6 +54,8 @@ Freely manage your tasks, subtasks, projects, tags, deadlines, focus sessions, d
 - **Project & Tag Management**: Full CRUD/reordering/color editing for Projects and Tags (excluding delete method) once supported by the Local REST API.
 - **Desktop Notifications & Sound Alerts**: Optional OS notifications and terminal bell/audio cues when Pomodoro, Flowtime, or Countdown, Scheduling, Due dates reminders.
 - **Vim Visual / Multi-Select Mode (`v` / `V`)**: Select multiple tasks to batch-complete, reschedule, move to a project, or delete in one action. Even SP didn't support this lol.
+- **Inline Task Editing (`e` / `i`)**: Edit task titles, time estimates, and due dates inline without opening a full modal.
+- CLI version `spt ls` if you're lazy to open the TUI
 
 ---
 
@@ -66,20 +68,19 @@ Ranked from most prioritized to less. Want to suggest a feature? Create a Issue,
 2. [l] **Active Time-Tracking Controls**: Start/pause/stop Super Productivity's live task timer directly from the task list with a ticking status-bar indicator.
 3. [l] **Custom Keybind Remapping**: Override or bind any action to custom keys or leader-key chords in `config.toml`. Keybind too hard to follow? (sorry :3), make your own then.
 4. [m] **Natural Language Due & Repeat Parsing**: Support phrases like `every weekday`, `in 3 days`, `next month`, and `every 2 weeks` in short syntax.
-5. [m] **Inline Task Editing (`e` / `i`)**: Edit task titles, time estimates, and due dates inline without opening a full modal.
-6. [l] **External `$EDITOR` Notes**: Press a keybind to edit long Markdown task notes in `nvim`, `vim`, or `$EDITOR`.
-7. [l] **Task Attachments & Links**: View, add, and open URLs or local file attachments linked to a task.
-8. [l] **Saved Filters & Smart Views**: User-defined filter queries (e.g., `overdue`, `high-estimate`, `@work + !today`) pinned to the sidebar.
-9. [l] **Split-Pane / Dual-Column Mode**: View two lists side-by-side (e.g., `Inbox` + `Today`) for drag-free keyboard triage.(Opinion: Just use nvim split-panes, then each terminal runs `spt` lol.)
-10. [l] **Time-Blocking / Agenda Timeline**: Hourly day-planner view to slot scheduled tasks into time blocks.
-11. [l] **Habit Streaks & Counter History**: Multi-day streak tracking and sparkline charts for Simple Counters. (Opinion: I personally rarely use habits for whatever reason)
-12. [l] **CSV / JSON / Markdown Export**: Export Worklog and History reports directly to Markdown tables, CSV, or JSON.
-13. [l] **Mouse Drag & Click Support**: Clickable sidebar items, task checkboxes, and scroll-wheel support across all panels.
-14. [h] **CLI Subcommands (`spt add`, `spt ls`, `spt sync`)**: Scriptable non-interactive CLI mode for shell aliases, cron jobs, and status bars (Waybar/Polybar/tmux).
-15. [l] **Plugin / Webhook Hooks**: Run custom shell scripts on events like `task_completed` or `pomodoro_finished`.
-16. [l] **Multi-Instance Profiles**: Switch between multiple Super Productivity API endpoints/tokens (e.g., Work vs. Personal) from `:s` or CLI flags.
-17. [m] **Undo/Redo Persistence**: Persist the 100-step undo history across `spt` restarts.
-18. [m] **Custom Nerd Font / ASCII Icon Toggle**: Config option to switch cleanly between Nerd Font glyphs and pure ASCII/Unicode symbols.
+5. [l] **External `$EDITOR` Notes**: Press a keybind to edit long Markdown task notes in `nvim`, `vim`, or `$EDITOR`.
+6. [l] **Task Attachments & Links**: View, add, and open URLs or local file attachments linked to a task.
+7. [l] **Saved Filters & Smart Views**: User-defined filter queries (e.g., `overdue`, `high-estimate`, `@work + !today`) pinned to the sidebar.
+8. [l] **Split-Pane / Dual-Column Mode**: View two lists side-by-side (e.g., `Inbox` + `Today`) for drag-free keyboard triage.(Opinion: Just use nvim split-panes, then each terminal runs `spt` lol.)
+9. [l] **Time-Blocking / Agenda Timeline**: Hourly day-planner view to slot scheduled tasks into time blocks.
+10. [l] **Habit Streaks & Counter History**: Multi-day streak tracking and sparkline charts for Simple Counters. (Opinion: I personally rarely use habits for whatever reason)
+11. [l] **CSV / JSON / Markdown Export**: Export Worklog and History reports directly to Markdown tables, CSV, or JSON.
+12. [l] **Mouse Drag & Click Support**: Clickable sidebar items, task checkboxes, and scroll-wheel support across all panels.
+13. [h] **CLI Subcommands (`spt add`, `spt ls`, `spt sync`)**: Scriptable non-interactive CLI mode for shell aliases, cron jobs, and status bars (Waybar/Polybar/tmux).
+14. [l] **Plugin / Webhook Hooks**: Run custom shell scripts on events like `task_completed` or `pomodoro_finished`.
+15. [l] **Multi-Instance Profiles**: Switch between multiple Super Productivity API endpoints/tokens (e.g., Work vs. Personal) from `:s` or CLI flags.
+16. [m] **Undo/Redo Persistence**: Persist the 100-step undo history across `spt` restarts.
+17. [m] **Custom Nerd Font / ASCII Icon Toggle**: Config option to switch cleanly between Nerd Font glyphs and pure ASCII/Unicode symbols.
 
 ## Bugs
 

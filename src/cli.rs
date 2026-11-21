@@ -1,8 +1,9 @@
 use crate::api::SuperProductivityClient;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, SyncMode};
 use crate::models::{CreateTaskPayload, Project, Tag, Task};
 use crate::offline::{OfflineCache, QueuedOp, sanitize_create_payload_for_sp};
 use crate::short_syntax::{parse_duration_ms, parse_short_syntax};
+use crate::supersync::{SuperSyncClient, generate_entity_id};
 use crate::theme::ThemeConfig;
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Duration as ChronoDuration, Local, NaiveDate, NaiveTime};
@@ -213,7 +214,9 @@ fn positional_args(args: &[String], value_flags: &[&str]) -> Vec<String> {
 
 struct Snapshot {
     theme: ThemeConfig,
+    sync_mode: SyncMode,
     client: SuperProductivityClient,
+    supersync: SuperSyncClient,
     cache: OfflineCache,
     online: bool,
     sp_installed: bool,
@@ -222,10 +225,56 @@ struct Snapshot {
 async fn load_snapshot(refresh: bool) -> Snapshot {
     let config = AppConfig::load();
     let theme = config.theme.clone();
+    let sync_mode = config.sync_mode;
     let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
+    let supersync = SuperSyncClient::new(
+        &config.supersync_url,
+        &config.supersync_token,
+        &config.supersync_encrypt_key,
+        true,
+    );
     let mut cache = OfflineCache::load();
     let mut online = false;
     let sp_installed = crate::config::is_sp_installed();
+
+    if sync_mode == SyncMode::SuperSync {
+        if refresh {
+            match supersync.sync_cycle().await {
+                Ok(ss) => {
+                    online = true;
+                    cache.tasks = ss.tasks;
+                    cache.projects = ss.projects;
+                    cache.tags = ss.tags;
+                    cache.counters = ss.counters;
+                    cache.current_task_id = ss.current_task_id;
+                }
+                Err(_) => {
+                    if let Some(ss) = supersync.try_cached_snapshot() {
+                        cache.tasks = ss.tasks;
+                        cache.projects = ss.projects;
+                        cache.tags = ss.tags;
+                        cache.counters = ss.counters;
+                        cache.current_task_id = ss.current_task_id;
+                    }
+                }
+            }
+        } else if let Some(ss) = supersync.try_cached_snapshot() {
+            cache.tasks = ss.tasks;
+            cache.projects = ss.projects;
+            cache.tags = ss.tags;
+            cache.counters = ss.counters;
+            cache.current_task_id = ss.current_task_id;
+        }
+        return Snapshot {
+            theme,
+            sync_mode,
+            client,
+            supersync,
+            cache,
+            online,
+            sp_installed,
+        };
+    }
 
     if refresh
         && !crate::config::force_no_sp()
@@ -251,7 +300,9 @@ async fn load_snapshot(refresh: bool) -> Snapshot {
 
     Snapshot {
         theme,
+        sync_mode,
         client,
+        supersync,
         cache,
         online,
         sp_installed,
@@ -670,6 +721,47 @@ async fn cmd_add(args: &[String], color_on: bool) -> Result<()> {
         is_add_to_top: Some(to_top),
     };
 
+    if snap.sync_mode == SyncMode::SuperSync {
+        let id = generate_entity_id();
+        let created = snap
+            .supersync
+            .create_task_op(id, payload.clone(), to_top)
+            .await;
+        let synced = snap.supersync.sync_cycle().await.is_ok();
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&created)?);
+        } else {
+            if !corrections.is_empty() {
+                println!(
+                    "{}",
+                    paint(
+                        snap.theme.warning_color(),
+                        &format!("Auto-corrected: {}", corrections.join(", ")),
+                        color_on
+                    )
+                );
+            }
+            let today = Local::now().format("%Y-%m-%d").to_string();
+            let meta = format_task_meta(&created, &projects, &tags, &today, &snap.theme, color_on);
+            let label = if synced {
+                "✓ Created"
+            } else {
+                "✓ Queued (SuperSync)"
+            };
+            println!(
+                "{} {} {}{meta}",
+                paint_bold(snap.theme.success_color(), label, color_on),
+                paint(snap.theme.fg_color(), &created.title, color_on),
+                paint(
+                    snap.theme.muted_color(),
+                    &format!("({})", created.id),
+                    color_on
+                )
+            );
+        }
+        return Ok(());
+    }
+
     if snap.online {
         let clean = sanitize_create_payload_for_sp(
             payload.clone(),
@@ -963,6 +1055,22 @@ async fn apply_patch(
     human_msg: &str,
     color_on: bool,
 ) -> Result<()> {
+    if snap.sync_mode == SyncMode::SuperSync {
+        if let Some(updated) = snap.supersync.update_task_op(task_id, patch).await {
+            let _ = snap.supersync.sync_cycle().await;
+            if let Some(slot) = snap.cache.tasks.iter_mut().find(|t| t.id == task_id) {
+                *slot = updated.clone();
+            }
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&updated)?);
+            } else {
+                println!("{}", paint(snap.theme.success_color(), human_msg, color_on));
+            }
+            return Ok(());
+        }
+        bail!("Task '{task_id}' not found in SuperSync state");
+    }
+
     if snap.online
         && !task_id.starts_with("offline-task-")
         && let Ok(updated) = snap.client.update_task(task_id, patch.clone()).await
@@ -1270,7 +1378,24 @@ async fn cmd_rm(args: &[String], color_on: bool) -> Result<()> {
     for task in targets {
         snap.cache.tasks.retain(|t| t.id != task.id);
 
-        if snap.online
+        if snap.sync_mode == SyncMode::SuperSync {
+            snap.supersync.delete_task_op(&task.id).await;
+            let _ = snap.supersync.sync_cycle().await;
+            if json_out {
+                println!("{}", json!({ "deleted": task.id }));
+            } else {
+                println!(
+                    "{} {} {}",
+                    paint_bold(snap.theme.danger_color(), "✗ Deleted", color_on),
+                    paint(snap.theme.fg_color(), &task.title, color_on),
+                    paint(
+                        snap.theme.muted_color(),
+                        &format!("({})", task.id),
+                        color_on
+                    )
+                );
+            }
+        } else if snap.online
             && !task.id.starts_with("offline-task-")
             && snap.client.delete_task(&task.id).await.is_ok()
         {
@@ -1324,6 +1449,27 @@ async fn cmd_start(args: &[String], color_on: bool) -> Result<()> {
     let task = resolve_task(&snap.cache.tasks, &query)?.clone();
     snap.cache.current_task_id = Some(task.id.clone());
 
+    if snap.sync_mode == SyncMode::SuperSync {
+        snap.supersync
+            .set_current_task_local(Some(task.id.clone()))
+            .await;
+        if json_out {
+            println!("{}", json!({ "tracking": task.id, "title": task.title }));
+        } else {
+            println!(
+                "{} {} {}",
+                paint_bold(snap.theme.success_color(), "▶ Tracking", color_on),
+                paint(snap.theme.fg_color(), &task.title, color_on),
+                paint(
+                    snap.theme.muted_color(),
+                    &format!("({})", task.id),
+                    color_on
+                )
+            );
+        }
+        return Ok(());
+    }
+
     if snap.online
         && !task.id.starts_with("offline-task-")
         && snap.client.set_current_task(Some(&task.id)).await.is_ok()
@@ -1374,6 +1520,23 @@ async fn cmd_stop(args: &[String], color_on: bool) -> Result<()> {
     let json_out = has_any_flag(args, &["--json", "-j"]);
     let mut snap = load_snapshot(true).await;
     snap.cache.current_task_id = None;
+
+    if snap.sync_mode == SyncMode::SuperSync {
+        snap.supersync.set_current_task_local(None).await;
+        if json_out {
+            println!("{}", json!({ "tracking": null }));
+        } else {
+            println!(
+                "{}",
+                paint(
+                    snap.theme.muted_color(),
+                    "■ Stopped active task timer.",
+                    color_on
+                )
+            );
+        }
+        return Ok(());
+    }
 
     if snap.online && snap.client.set_current_task(None).await.is_ok() {
         let _ = snap.cache.save();
@@ -1492,7 +1655,7 @@ async fn cmd_status(args: &[String], color_on: bool) -> Result<()> {
             snap.cache.pending_ops.len(),
             if snap.online {
                 "Online"
-            } else if snap.sp_installed {
+            } else if snap.sync_mode == SyncMode::SuperSync || snap.sp_installed {
                 "Offline"
             } else {
                 "Local"
@@ -1893,6 +2056,41 @@ async fn cmd_worklog(args: &[String], color_on: bool) -> Result<()> {
 async fn cmd_sync(args: &[String], color_on: bool) -> Result<()> {
     let json_out = has_any_flag(args, &["--json", "-j"]);
     let config = AppConfig::load();
+    if config.sync_mode == SyncMode::SuperSync {
+        let ss = SuperSyncClient::new(
+            &config.supersync_url,
+            &config.supersync_token,
+            &config.supersync_encrypt_key,
+            true,
+        );
+        let snap = ss.sync_cycle().await?;
+        if json_out {
+            println!(
+                "{}",
+                json!({
+                    "mode": "supersync",
+                    "tasks": snap.tasks.len(),
+                    "projects": snap.projects.len(),
+                    "tags": snap.tags.len(),
+                    "message": snap.message,
+                })
+            );
+        } else {
+            println!(
+                "{} {} tasks, {} projects, {} tags{}",
+                paint_bold(config.theme.success_color(), "✓ SuperSync:", color_on),
+                snap.tasks.len(),
+                snap.projects.len(),
+                snap.tags.len(),
+                if snap.message.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", snap.message)
+                }
+            );
+        }
+        return Ok(());
+    }
     let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
     let mut cache = OfflineCache::load();
 
@@ -1993,6 +2191,94 @@ async fn cmd_sync(args: &[String], color_on: bool) -> Result<()> {
 async fn cmd_doctor(args: &[String], color_on: bool) -> Result<()> {
     let json_out = has_any_flag(args, &["--json", "-j"]);
     let config = AppConfig::load();
+    if config.sync_mode == SyncMode::SuperSync {
+        let ss = SuperSyncClient::new(
+            &config.supersync_url,
+            &config.supersync_token,
+            &config.supersync_encrypt_key,
+            true,
+        );
+        let configured = ss.is_configured().await;
+        let status_res = if configured {
+            Some(ss.status().await)
+        } else {
+            None
+        };
+        let ss_ok = matches!(&status_res, Some(Ok(_)));
+        let snap = ss.try_cached_snapshot();
+        let cached_tasks = snap.as_ref().map(|s| s.tasks.len()).unwrap_or(0);
+        if json_out {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "sync_mode": "supersync",
+                    "supersync_url": config.supersync_url,
+                    "configured": configured,
+                    "online": ss_ok,
+                    "latest_seq": status_res.as_ref().and_then(|r| r.as_ref().ok()).map(|s| s.latest_seq),
+                    "config_path": AppConfig::config_path(),
+                    "state_path": crate::supersync::SuperSyncState::state_path(),
+                    "cached_tasks": cached_tasks,
+                }))?
+            );
+        } else {
+            println!(
+                "{}",
+                paint_bold(
+                    config.theme.accent_color(),
+                    "spt doctor (SuperSync)",
+                    color_on
+                )
+            );
+            println!(
+                "├─ Server ({}): {}",
+                config.supersync_url,
+                if !configured {
+                    paint_bold(
+                        config.theme.warning_color(),
+                        "NOT CONFIGURED (set token & password in :s)",
+                        color_on,
+                    )
+                } else if let Some(Ok(s)) = status_res {
+                    paint_bold(
+                        config.theme.success_color(),
+                        &format!(
+                            "OK (latestSeq={}, {} devices)",
+                            s.latest_seq, s.devices_online
+                        ),
+                        color_on,
+                    )
+                } else if let Some(Err(e)) = status_res {
+                    paint_bold(
+                        config.theme.danger_color(),
+                        &format!("ERROR ({e})"),
+                        color_on,
+                    )
+                } else {
+                    paint_bold(config.theme.danger_color(), "OFFLINE", color_on)
+                }
+            );
+            println!(
+                "├─ Config: {}",
+                paint(
+                    config.theme.muted_color(),
+                    &AppConfig::config_path().display().to_string(),
+                    color_on
+                )
+            );
+            println!(
+                "╰─ State:  {} ({cached_tasks} tasks)",
+                paint(
+                    config.theme.muted_color(),
+                    &crate::supersync::SuperSyncState::state_path()
+                        .display()
+                        .to_string(),
+                    color_on
+                )
+            );
+        }
+        return Ok(());
+    }
     let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
     let cache = OfflineCache::load();
     let api_ok = !crate::config::force_no_sp()
@@ -2077,10 +2363,10 @@ async fn cmd_doctor(args: &[String], color_on: bool) -> Result<()> {
 }
 
 async fn maybe_print_cli_local_notice(color_on: bool) {
-    if crate::config::is_sp_installed() {
+    let mut cfg = AppConfig::load();
+    if cfg.sync_mode == SyncMode::SuperSync || crate::config::is_sp_installed() {
         return;
     }
-    let mut cfg = AppConfig::load();
     if cfg.seen_local_notice {
         return;
     }
