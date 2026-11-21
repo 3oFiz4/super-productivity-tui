@@ -370,22 +370,6 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = padded.inner(area);
     frame.render_widget(padded, area);
 
-    let tasks = app.filtered_tasks();
-    if tasks.is_empty() {
-        let msg = if app.connected {
-            "No tasks in this view. Press 'a' to add one."
-        } else {
-            "Not connected to Super Productivity. Press ':s' for Settings."
-        };
-        frame.render_widget(
-            Paragraph::new(msg)
-                .style(Style::default().fg(app.config.theme.muted_color()))
-                .alignment(Alignment::Center),
-            inner,
-        );
-        return;
-    }
-
     let today_str = Local::now().format("%Y-%m-%d").to_string();
     let search_height = if app.search_active || !app.search_query.is_empty() {
         1
@@ -421,6 +405,25 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
             ),
         ]);
         frame.render_widget(Paragraph::new(search_line), search_area);
+    }
+
+    let tasks = app.filtered_tasks();
+    if tasks.is_empty() {
+        app.areas.task_rows.clear();
+        let msg = if !app.search_query.trim().is_empty() {
+            "No tasks match the search query."
+        } else if app.connected {
+            "No tasks in this view. Press 'a' to add one."
+        } else {
+            "Not connected to Super Productivity. Press ':s' for Settings."
+        };
+        frame.render_widget(
+            Paragraph::new(msg)
+                .style(Style::default().fg(app.config.theme.muted_color()))
+                .alignment(Alignment::Center),
+            list_area,
+        );
+        return;
     }
 
     let visible_h = list_area.height as usize;
