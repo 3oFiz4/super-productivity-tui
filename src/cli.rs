@@ -228,6 +228,7 @@ async fn load_snapshot(refresh: bool) -> Snapshot {
     let sp_installed = crate::config::is_sp_installed();
 
     if refresh
+        && !crate::config::force_no_sp()
         && let Ok(h) = client.health().await
         && h.server == "up"
         && h.renderer_ready
@@ -1994,7 +1995,8 @@ async fn cmd_doctor(args: &[String], color_on: bool) -> Result<()> {
     let config = AppConfig::load();
     let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
     let cache = OfflineCache::load();
-    let api_ok = matches!(client.health().await, Ok(h) if h.server == "up" && h.renderer_ready);
+    let api_ok = !crate::config::force_no_sp()
+        && matches!(client.health().await, Ok(h) if h.server == "up" && h.renderer_ready);
     let sp_installed = crate::config::is_sp_installed();
     let bridge_ok = config.bridge_port > 0
         && TcpStream::connect_timeout(

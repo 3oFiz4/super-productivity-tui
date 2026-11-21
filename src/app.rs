@@ -1089,6 +1089,18 @@ impl App {
         let client = self.client.clone();
         let tx = self.api_tx.clone();
         tokio::spawn(async move {
+            if crate::config::force_no_sp() {
+                let _ = tx.send(ApiEvent::Loaded {
+                    tasks: Vec::new(),
+                    projects: Vec::new(),
+                    tags: Vec::new(),
+                    counters: None,
+                    current_task_id: None,
+                    connected: false,
+                    message: String::new(),
+                });
+                return;
+            }
             match client.health().await {
                 Ok(h) if h.server == "up" && h.renderer_ready => {
                     let tasks = client.get_tasks().await;
@@ -1712,10 +1724,11 @@ impl App {
             let client = self.client.clone();
             let tx = self.api_tx.clone();
             tokio::spawn(async move {
-                let is_up = matches!(
-                    client.health().await,
-                    Ok(h) if h.server == "up" && h.renderer_ready
-                );
+                let is_up = !crate::config::force_no_sp()
+                    && matches!(
+                        client.health().await,
+                        Ok(h) if h.server == "up" && h.renderer_ready
+                    );
                 let _ = tx.send(ApiEvent::HealthCheck(is_up));
             });
         }

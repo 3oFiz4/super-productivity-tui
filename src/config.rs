@@ -144,14 +144,19 @@ impl AppConfig {
     }
 }
 
+/// Returns `true` when `SPT_FORCE_NO_SP=1` (or `true`) is set to simulate SP not being installed/running.
+pub fn force_no_sp() -> bool {
+    std::env::var("SPT_FORCE_NO_SP").is_ok_and(|val| {
+        let v = val.trim().to_ascii_lowercase();
+        v == "1" || v == "true"
+    })
+}
+
 /// Returns `true` if a Super Productivity desktop executable is detected on this machine.
 /// Developers can set `SPT_FORCE_NO_SP=1` (or `true`) to simulate SP not being installed.
 pub fn is_sp_installed() -> bool {
-    if let Ok(val) = std::env::var("SPT_FORCE_NO_SP") {
-        let v = val.trim().to_ascii_lowercase();
-        if v == "1" || v == "true" {
-            return false;
-        }
+    if force_no_sp() {
+        return false;
     }
 
     #[cfg(target_os = "windows")]
