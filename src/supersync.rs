@@ -17,9 +17,10 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 4;
@@ -472,11 +473,27 @@ struct SuperSyncInner {
     state: SuperSyncState,
 }
 
+pub struct OpWriteGuard {
+    counter: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+}
+
+impl Drop for OpWriteGuard {
+    fn drop(&mut self) {
+        if self.counter.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.notify.notify_waiters();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SuperSyncClient {
     http: reqwest::Client,
     inner: Arc<Mutex<SuperSyncInner>>,
     crypto: Arc<StdMutex<CryptoCache>>,
+    sync_lock: Arc<Mutex<()>>,
+    pending_writes: Arc<AtomicUsize>,
+    writes_notify: Arc<Notify>,
 }
 
 impl SuperSyncClient {
@@ -504,7 +521,28 @@ impl SuperSyncClient {
                 state,
             })),
             crypto: Arc::new(StdMutex::new(CryptoCache::default())),
+            sync_lock: Arc::new(Mutex::new(())),
+            pending_writes: Arc::new(AtomicUsize::new(0)),
+            writes_notify: Arc::new(Notify::new()),
         }
+    }
+
+    pub fn begin_op_write(&self) -> OpWriteGuard {
+        self.pending_writes.fetch_add(1, Ordering::SeqCst);
+        OpWriteGuard {
+            counter: self.pending_writes.clone(),
+            notify: self.writes_notify.clone(),
+        }
+    }
+
+    pub async fn flush_pending_writes(&self) {
+        while self.pending_writes.load(Ordering::SeqCst) > 0 {
+            self.writes_notify.notified().await;
+        }
+    }
+
+    pub async fn has_pending_ops(&self) -> bool {
+        !self.inner.lock().await.state.pending_ops.is_empty()
     }
 
     pub async fn update_credentials(&self, base_url: &str, token: &str, encrypt_key: &str) {
@@ -575,6 +613,7 @@ impl SuperSyncClient {
 
     /// Full sync cycle: downloads new ops, decrypts and applies them, then uploads any pending local ops.
     pub async fn sync_cycle(&self) -> Result<SuperSyncSnapshot> {
+        let _sync_guard = self.sync_lock.lock().await;
         let (base_url, token, encrypt_key, mut state_snapshot) = {
             let inner = self.inner.lock().await;
             if inner.cfg.base_url.is_empty() {

@@ -1988,6 +1988,7 @@ impl App {
         }
 
         if self.connected
+            && !self.is_supersync()
             && !self.sync_in_flight
             && self.active_modal == ActiveModal::None
             && self.rename_target.is_none()
@@ -3153,12 +3154,11 @@ impl App {
                 .retain(|t| t.project_id.as_deref() != Some(pid.as_str()));
             self.clamp_selections();
             let ss = self.supersync.clone();
-            let tx = self.api_tx.clone();
-            let cur = self.current_task_id.clone();
-            self.status_message = "Project deleted (syncing...)".to_string();
+            let _guard = ss.begin_op_write();
+            self.status_message = "Project deleted (queued for sync on quit)".to_string();
             tokio::spawn(async move {
+                let _guard = _guard;
                 ss.delete_project_op(&pid).await;
-                push_supersync_cycle(&ss, &tx, cur).await;
             });
             return;
         }
@@ -3199,12 +3199,11 @@ impl App {
             }
             self.clamp_selections();
             let ss = self.supersync.clone();
-            let tx = self.api_tx.clone();
-            let cur = self.current_task_id.clone();
-            self.status_message = "Tag deleted (syncing...)".to_string();
+            let _guard = ss.begin_op_write();
+            self.status_message = "Tag deleted (queued for sync on quit)".to_string();
             tokio::spawn(async move {
+                let _guard = _guard;
                 ss.delete_tag_op(&tid).await;
-                push_supersync_cycle(&ss, &tx, cur).await;
             });
             return;
         }
@@ -3435,11 +3434,10 @@ impl App {
     fn spawn_patch(&mut self, id: String, patch: serde_json::Value) {
         if self.is_supersync() {
             let ss = self.supersync.clone();
-            let tx = self.api_tx.clone();
-            let cur = self.current_task_id.clone();
+            let _guard = ss.begin_op_write();
             tokio::spawn(async move {
+                let _guard = _guard;
                 ss.update_task_op(&id, patch).await;
-                push_supersync_cycle(&ss, &tx, cur).await;
             });
             return;
         }
@@ -3509,11 +3507,10 @@ impl App {
             }
             self.clamp_selections();
             let ss = self.supersync.clone();
-            let tx = self.api_tx.clone();
-            let cur = self.current_task_id.clone();
+            let _guard = ss.begin_op_write();
             tokio::spawn(async move {
+                let _guard = _guard;
                 ss.create_task_op(id, payload, to_top).await;
-                push_supersync_cycle(&ss, &tx, cur).await;
             });
             return;
         }
@@ -3602,11 +3599,10 @@ impl App {
     fn spawn_delete(&mut self, id: String) {
         if self.is_supersync() {
             let ss = self.supersync.clone();
-            let tx = self.api_tx.clone();
-            let cur = self.current_task_id.clone();
+            let _guard = ss.begin_op_write();
             tokio::spawn(async move {
+                let _guard = _guard;
                 ss.delete_task_op(&id).await;
-                push_supersync_cycle(&ss, &tx, cur).await;
             });
             return;
         }
@@ -4161,12 +4157,11 @@ impl App {
                 }
                 if self.is_supersync() {
                     let ss = self.supersync.clone();
-                    let tx = self.api_tx.clone();
-                    let cur = self.current_task_id.clone();
-                    self.status_message = "Project renamed (syncing...)".to_string();
+                    let _guard = ss.begin_op_write();
+                    self.status_message = "Project renamed (queued for sync on quit)".to_string();
                     tokio::spawn(async move {
+                        let _guard = _guard;
                         ss.rename_project_op(&id, &new_title).await;
-                        push_supersync_cycle(&ss, &tx, cur).await;
                     });
                     return;
                 }
@@ -4202,12 +4197,11 @@ impl App {
                 }
                 if self.is_supersync() {
                     let ss = self.supersync.clone();
-                    let tx = self.api_tx.clone();
-                    let cur = self.current_task_id.clone();
-                    self.status_message = "Tag renamed (syncing...)".to_string();
+                    let _guard = ss.begin_op_write();
+                    self.status_message = "Tag renamed (queued for sync on quit)".to_string();
                     tokio::spawn(async move {
+                        let _guard = _guard;
                         ss.rename_tag_op(&id, &new_title).await;
-                        push_supersync_cycle(&ss, &tx, cur).await;
                     });
                     return;
                 }
@@ -5016,12 +5010,12 @@ impl App {
                             }
                             if self.is_supersync() {
                                 let ss = self.supersync.clone();
-                                let tx = self.api_tx.clone();
-                                let cur = self.current_task_id.clone();
-                                self.status_message = "Project updated (syncing...)".to_string();
+                                let _guard = ss.begin_op_write();
+                                self.status_message =
+                                    "Project updated (queued for sync on quit)".to_string();
                                 tokio::spawn(async move {
+                                    let _guard = _guard;
                                     ss.update_project_color_title_op(&id, &title, &color).await;
-                                    push_supersync_cycle(&ss, &tx, cur).await;
                                 });
                                 return;
                             }
@@ -5044,12 +5038,12 @@ impl App {
                             }
                             if self.is_supersync() {
                                 let ss = self.supersync.clone();
-                                let tx = self.api_tx.clone();
-                                let cur = self.current_task_id.clone();
-                                self.status_message = "Tag updated (syncing...)".to_string();
+                                let _guard = ss.begin_op_write();
+                                self.status_message =
+                                    "Tag updated (queued for sync on quit)".to_string();
                                 tokio::spawn(async move {
+                                    let _guard = _guard;
                                     ss.update_tag_color_title_op(&id, &title, &color).await;
-                                    push_supersync_cycle(&ss, &tx, cur).await;
                                 });
                                 return;
                             }
@@ -5083,12 +5077,12 @@ impl App {
                             };
                             self.projects.push(proj);
                             let ss = self.supersync.clone();
-                            let tx = self.api_tx.clone();
-                            let cur = self.current_task_id.clone();
-                            self.status_message = "Project created (syncing...)".to_string();
+                            let _guard = ss.begin_op_write();
+                            self.status_message =
+                                "Project created (queued for sync on quit)".to_string();
                             tokio::spawn(async move {
+                                let _guard = _guard;
                                 ss.create_project_op(id, &title, &color).await;
-                                push_supersync_cycle(&ss, &tx, cur).await;
                             });
                         }
                         AddEntityKind::Tag => {
@@ -5100,12 +5094,12 @@ impl App {
                             };
                             self.tags.push(tag);
                             let ss = self.supersync.clone();
-                            let tx = self.api_tx.clone();
-                            let cur = self.current_task_id.clone();
-                            self.status_message = "Tag created (syncing...)".to_string();
+                            let _guard = ss.begin_op_write();
+                            self.status_message =
+                                "Tag created (queued for sync on quit)".to_string();
                             tokio::spawn(async move {
+                                let _guard = _guard;
                                 ss.create_tag_op(id, &title, &color).await;
-                                push_supersync_cycle(&ss, &tx, cur).await;
                             });
                         }
                     }
@@ -5327,11 +5321,10 @@ impl App {
                     let id = c.id.clone();
                     if self.is_supersync() {
                         let ss = self.supersync.clone();
-                        let tx = self.api_tx.clone();
-                        let cur = self.current_task_id.clone();
+                        let _guard = ss.begin_op_write();
                         tokio::spawn(async move {
+                            let _guard = _guard;
                             ss.set_counter_today_op(&id, 0).await;
-                            push_supersync_cycle(&ss, &tx, cur).await;
                         });
                     } else {
                         self.config.counters = self.counters.clone();
@@ -5357,11 +5350,10 @@ impl App {
             let count = c.count;
             if self.is_supersync() {
                 let ss = self.supersync.clone();
-                let tx = self.api_tx.clone();
-                let cur = self.current_task_id.clone();
+                let _guard = ss.begin_op_write();
                 tokio::spawn(async move {
+                    let _guard = _guard;
                     ss.set_counter_today_op(&id, count).await;
-                    push_supersync_cycle(&ss, &tx, cur).await;
                 });
             } else {
                 self.config.counters = self.counters.clone();
@@ -5832,6 +5824,41 @@ mod tests {
             app.settings_state.active_field,
             SettingsField::SuperSyncBrowserConnect
         );
+    }
+
+    #[tokio::test]
+    async fn supersync_tui_queues_rapid_creates_without_mid_session_sync() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cfg = AppConfig {
+            sync_mode: SyncMode::SuperSync,
+            ..Default::default()
+        };
+        let mut app = App::new(cfg, tx);
+
+        for i in 1..=3 {
+            app.spawn_create(
+                CreateTaskPayload {
+                    title: format!("Rapid Todo {i}"),
+                    notes: None,
+                    project_id: None,
+                    parent_id: None,
+                    tag_ids: vec![],
+                    due_day: None,
+                    deadline_day: None,
+                    time_estimate: None,
+                    time_spent: None,
+                    is_add_to_top: Some(false),
+                },
+                false,
+                true,
+            );
+        }
+
+        assert_eq!(app.tasks.len(), 3);
+        assert!(!app.sync_in_flight);
+        app.supersync.flush_pending_writes().await;
+        assert!(app.supersync.has_pending_ops().await);
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

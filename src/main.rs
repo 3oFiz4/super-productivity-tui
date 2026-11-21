@@ -31,6 +31,21 @@ use tokio::sync::mpsc;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    if cli_args.len() == 1 && cli_args[0] == "--bg-supersync-flush" {
+        let cfg = AppConfig::load();
+        if cfg.sync_mode == config::SyncMode::SuperSync {
+            let ss = supersync::SuperSyncClient::new(
+                &cfg.supersync_url,
+                &cfg.supersync_token,
+                &cfg.supersync_encrypt_key,
+                true,
+            );
+            if ss.is_configured().await && ss.has_pending_ops().await {
+                let _ = ss.sync_cycle().await;
+            }
+        }
+        return Ok(());
+    }
     if !cli_args.is_empty() {
         let color_on = !cli_args.iter().any(|a| a == "--no-color" || a == "-C")
             && std::env::var_os("NO_COLOR").is_none();
@@ -97,5 +112,31 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()
         }
     }
 
+    if app.is_supersync() {
+        app.supersync.flush_pending_writes().await;
+        if app.supersync.has_pending_ops().await && !spawn_supersync_background_flush() {
+            let _ = app.supersync.sync_cycle().await;
+        }
+    }
+
     Ok(())
+}
+
+fn spawn_supersync_background_flush() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--bg-supersync-flush")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
+    }
+    cmd.spawn().is_ok()
 }
