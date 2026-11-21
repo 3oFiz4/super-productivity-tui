@@ -257,7 +257,14 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_nav_row(frame: &mut Frame, app: &App, row: &crate::app::NavRow, idx: usize, rect: Rect) {
     let is_selected = app.focus == FocusSection::Nav && app.nav_selected == idx;
-    let is_active_filter = matches!(&row.kind, NavItemKind::Filter(f) if *f == app.active_filter);
+    let is_active = match &row.kind {
+        NavItemKind::Filter(f) => *f == app.active_filter,
+        NavItemKind::History => app.active_modal == ActiveModal::History,
+        NavItemKind::Counters => app.active_modal == ActiveModal::Counters,
+        NavItemKind::Help => app.active_modal == ActiveModal::Help,
+        NavItemKind::Settings => app.active_modal == ActiveModal::Settings,
+        NavItemKind::ToggleProjects | NavItemKind::ToggleTags => false,
+    };
 
     let fg = match &row.kind {
         NavItemKind::Filter(NavFilter::Project(pid)) => app
@@ -276,8 +283,11 @@ fn render_nav_row(frame: &mut Frame, app: &App, row: &crate::app::NavRow, idx: u
     };
 
     let mut style = Style::default().fg(fg);
-    if is_active_filter {
-        style = style.add_modifier(Modifier::BOLD);
+    if is_active {
+        style = style
+            .bg(app.config.theme.selection_bg_color())
+            .fg(app.config.theme.accent_color())
+            .add_modifier(Modifier::BOLD);
     }
     if app.nav_row_matches(&row.label) {
         style = style
@@ -285,9 +295,15 @@ fn render_nav_row(frame: &mut Frame, app: &App, row: &crate::app::NavRow, idx: u
             .add_modifier(Modifier::BOLD);
     }
     if is_selected {
+        let sel_fg = if is_active {
+            app.config.theme.accent_color()
+        } else {
+            app.config.theme.fg_color()
+        };
         style = style
             .bg(app.config.theme.selection_bg_color())
-            .fg(app.config.theme.fg_color());
+            .fg(sel_fg)
+            .add_modifier(Modifier::BOLD);
     }
 
     let indent_str = " ".repeat(row.indent as usize);
