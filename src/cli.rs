@@ -21,7 +21,21 @@ pub async fn run(args: Vec<String>) -> Result<()> {
     let color_on =
         !has_any_flag(&args, &["--no-color", "-C"]) && std::env::var_os("NO_COLOR").is_none();
 
-    match cmd.as_str() {
+    let suppress_update_alert = has_any_flag(&args, &["--json", "-j"])
+        || matches!(
+            cmd.as_str(),
+            "-h" | "--help"
+                | "help"
+                | "-V"
+                | "--version"
+                | "version"
+                | "vc"
+                | "vi"
+                | "vI"
+                | "status"
+        );
+
+    let res = match cmd.as_str() {
         "-h" | "--help" | "help" => {
             print_help(&AppConfig::load().theme, color_on);
             Ok(())
@@ -49,8 +63,16 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         "worklog" => cmd_worklog(rest, color_on).await,
         "sync" => cmd_sync(rest, color_on).await,
         "doctor" => cmd_doctor(rest, color_on).await,
+        "vc" => cmd_vc(rest, color_on).await,
+        "vi" => cmd_vi(color_on).await,
+        "vI" => cmd_vi_forever(color_on),
         other => bail!("Unknown subcommand '{other}'. Run `spt --help` for usage."),
+    };
+
+    if res.is_ok() && !suppress_update_alert {
+        maybe_print_cli_update_alert(color_on).await;
     }
+    res
 }
 
 fn paint(c: Color, text: &str, enabled: bool) -> String {
@@ -149,6 +171,7 @@ COMMANDS:
     worklog                 Time-tracking breakdown (-D/--day, -w/--week, -m/--month, -b/--by project|tag)
     sync                    Flush offline queue and refresh local cache
     doctor                  Check API, companion bridge, config, and cache health
+    vc / vi / vI            View latest release changelog / ignore until next / ignore forever
 
 ID PATTERNS & MULTI-ID:
     SQL-like dot patterns: 'G2.' (starts with G2), '._g' (ends with _g), 'G2.k_g' (G2...k_g)
@@ -2016,6 +2039,102 @@ async fn cmd_doctor(args: &[String], color_on: bool) -> Result<()> {
             cache.pending_ops.len()
         );
     }
+    Ok(())
+}
+
+async fn maybe_print_cli_update_alert(color_on: bool) {
+    let cfg = AppConfig::load();
+    if cfg.ignore_update_forever {
+        return;
+    }
+    let Some(rel) = crate::update::check_for_update_cached(false).await else {
+        return;
+    };
+    if !crate::update::should_notify(&cfg, &rel) {
+        return;
+    }
+    let theme = &cfg.theme;
+    let border = paint_bold(theme.success_color(), "┃", color_on);
+    let alert = paint_bold(theme.warning_color(), "[alert]", color_on);
+    let ver = paint_bold(theme.success_color(), &rel.tag_name, color_on);
+    let vc = paint_bold(theme.accent_color(), "spt vc", color_on);
+    let vi = paint_bold(theme.accent_color(), "spt vi", color_on);
+    let v_forever = paint_bold(theme.accent_color(), "spt vI", color_on);
+    println!();
+    println!("{border} {alert} new version {ver} released:");
+    println!(
+        "{border} type `{vc}` to see version changelog, `{vi}` to ignore until next release, or `{v_forever}` to ignore forever"
+    );
+}
+
+async fn cmd_vc(args: &[String], color_on: bool) -> Result<()> {
+    let json_out = has_any_flag(args, &["--json", "-j"]);
+    let cfg = AppConfig::load();
+    let rel = crate::update::check_for_update_cached(true)
+        .await
+        .ok_or_else(|| anyhow!("Could not fetch latest release from GitHub."))?;
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&rel)?);
+        return Ok(());
+    }
+    println!(
+        "{} {}",
+        paint_bold(
+            cfg.theme.success_color(),
+            &format!("Release {}", rel.tag_name),
+            color_on
+        ),
+        paint(
+            cfg.theme.muted_color(),
+            &format!("(current v{})", crate::update::CURRENT_VERSION),
+            color_on
+        )
+    );
+    if !rel.html_url.is_empty() {
+        println!(
+            "{}",
+            paint(cfg.theme.accent_color(), &rel.html_url, color_on)
+        );
+    }
+    println!();
+    if rel.body.trim().is_empty() {
+        println!("(No release notes provided.)");
+    } else {
+        println!("{}", rel.body);
+    }
+    Ok(())
+}
+
+async fn cmd_vi(color_on: bool) -> Result<()> {
+    let mut cfg = AppConfig::load();
+    let rel = crate::update::check_for_update_cached(false)
+        .await
+        .ok_or_else(|| anyhow!("No cached or online release found to ignore."))?;
+    cfg.ignored_update_version = Some(rel.tag_name.clone());
+    cfg.save()?;
+    println!(
+        "{}",
+        paint(
+            cfg.theme.success_color(),
+            &format!("✓ Ignored update {} until next release.", rel.tag_name),
+            color_on
+        )
+    );
+    Ok(())
+}
+
+fn cmd_vi_forever(color_on: bool) -> Result<()> {
+    let mut cfg = AppConfig::load();
+    cfg.ignore_update_forever = true;
+    cfg.save()?;
+    println!(
+        "{}",
+        paint(
+            cfg.theme.warning_color(),
+            "✓ Update notifications disabled forever (edit ignore_update_forever in config.toml to re-enable).",
+            color_on
+        )
+    );
     Ok(())
 }
 

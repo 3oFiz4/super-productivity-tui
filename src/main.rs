@@ -10,6 +10,7 @@ mod offline;
 mod short_syntax;
 mod theme;
 mod ui;
+mod update;
 
 use anyhow::Result;
 use app::{ApiEvent, App};
@@ -66,6 +67,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()
     let mut app = App::new(config, api_tx);
     app.bridge = bridge;
     app.refresh_all();
+    app.check_for_updates();
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(50));

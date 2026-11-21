@@ -75,6 +75,7 @@ pub enum ActiveModal {
     Pomodoro,
     Reschedule,
     DailySummary,
+    Changelog,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -732,6 +733,7 @@ pub enum ApiEvent {
         ack: BridgeAck,
     },
     MutationOfflineFallback(QueuedOp),
+    UpdateAvailable(crate::update::ReleaseInfo),
     Error(String),
 }
 
@@ -814,6 +816,9 @@ pub struct App {
     pub redo_stack: Vec<UndoOp>,
     pub notified_reminders: HashSet<String>,
     pub notified_due_dates: HashSet<String>,
+    pub available_update: Option<crate::update::ReleaseInfo>,
+    pub changelog_scroll: usize,
+    pub colon_v_pending: bool,
 
     pub areas: UiAreas,
     pub api_tx: mpsc::UnboundedSender<ApiEvent>,
@@ -914,6 +919,9 @@ impl App {
             redo_stack: Vec::new(),
             notified_reminders: HashSet::new(),
             notified_due_dates: HashSet::new(),
+            available_update: None,
+            changelog_scroll: 0,
+            colon_v_pending: false,
             areas: UiAreas::default(),
             api_tx,
         }
@@ -1052,6 +1060,21 @@ impl App {
 
     pub fn refresh_all(&mut self) {
         self.sync_with_replay();
+    }
+
+    pub fn check_for_updates(&self) {
+        if self.config.ignore_update_forever {
+            return;
+        }
+        let cfg = self.config.clone();
+        let tx = self.api_tx.clone();
+        tokio::spawn(async move {
+            if let Some(rel) = crate::update::check_for_update_cached(false).await
+                && crate::update::should_notify(&cfg, &rel)
+            {
+                let _ = tx.send(ApiEvent::UpdateAvailable(rel));
+            }
+        });
     }
 
     fn refresh_all_inner(&self) {
@@ -1352,6 +1375,13 @@ impl App {
                 self.tags.retain(|t| t.id != id);
                 self.status_message = "Tag deleted".to_string();
                 self.clamp_selections();
+            }
+            ApiEvent::UpdateAvailable(rel) => {
+                if crate::update::should_notify(&self.config, &rel)
+                    || self.active_modal == ActiveModal::Changelog
+                {
+                    self.available_update = Some(rel);
+                }
             }
             ApiEvent::Error(msg) => {
                 self.status_message = msg;
@@ -1852,6 +1882,10 @@ impl App {
                 self.handle_daily_summary_key(key);
                 return;
             }
+            ActiveModal::Changelog => {
+                self.handle_changelog_key(key);
+                return;
+            }
             ActiveModal::None => {}
         }
 
@@ -2013,8 +2047,48 @@ impl App {
         }
 
         if let KeyCode::Char(ch) = key.code {
+            if self.colon_v_pending {
+                self.colon_v_pending = false;
+                match ch {
+                    'c' => {
+                        self.changelog_scroll = 0;
+                        self.active_modal = ActiveModal::Changelog;
+                        if self.available_update.is_none() {
+                            let tx = self.api_tx.clone();
+                            tokio::spawn(async move {
+                                if let Some(rel) =
+                                    crate::update::check_for_update_cached(true).await
+                                {
+                                    let _ = tx.send(ApiEvent::UpdateAvailable(rel));
+                                }
+                            });
+                        }
+                    }
+                    'i' => {
+                        if let Some(rel) = self.available_update.take() {
+                            self.config.ignored_update_version = Some(rel.tag_name.clone());
+                            let _ = self.config.save();
+                            self.status_message =
+                                format!("Ignored update {} until next release.", rel.tag_name);
+                        }
+                    }
+                    'I' => {
+                        self.available_update = None;
+                        self.config.ignore_update_forever = true;
+                        let _ = self.config.save();
+                        self.status_message = "Update notifications disabled forever.".to_string();
+                    }
+                    _ => {}
+                }
+                return;
+            }
             if let Some((first, second)) = self.sequence.push(ch) {
                 match (first, second) {
+                    (':', 'v') => {
+                        self.sequence.clear();
+                        self.colon_v_pending = true;
+                        return;
+                    }
                     (':', 'h') => {
                         self.sequence.clear();
                         self.help_search.clear();
@@ -2623,6 +2697,27 @@ impl App {
             .sum();
 
         (completed, unfinished, total_focus_ms)
+    }
+
+    fn handle_changelog_key(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(ch) = key.code
+            && self.prop_jk_tracker.on_char(ch) == JkResult::Escaped
+        {
+            self.active_modal = ActiveModal::None;
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.active_modal = ActiveModal::None,
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.changelog_scroll = self.changelog_scroll.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.changelog_scroll = self.changelog_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('g') => self.changelog_scroll = 0,
+            KeyCode::Char('G') => self.changelog_scroll = usize::MAX / 2,
+            _ => {}
+        }
     }
 
     fn handle_daily_summary_key(&mut self, key: KeyEvent) {

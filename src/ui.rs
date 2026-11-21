@@ -87,13 +87,19 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let fg = app.config.theme.fg_color();
     frame.render_widget(Block::default().style(Style::default().bg(bg).fg(fg)), root);
 
+    let update_h = if app.available_update.is_some() { 1 } else { 0 };
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(update_h),
+            Constraint::Length(1),
+        ])
         .split(root);
 
     let body = outer[0];
-    let status_bar = outer[1];
+    let update_bar = outer[1];
+    let status_bar = outer[2];
 
     if app.show_sidebar {
         let sidebar_w = (body.width * 20 / 100).max(22).min(body.width / 2);
@@ -127,6 +133,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_main(frame, app, cols[1]);
     }
 
+    if update_h > 0 {
+        render_update_banner(frame, app, update_bar);
+    }
     render_status_bar(frame, app, status_bar);
 
     if !matches!(app.active_modal, ActiveModal::None | ActiveModal::Theme) {
@@ -147,6 +156,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ActiveModal::Pomodoro => render_pomodoro_modal(frame, app, root),
         ActiveModal::Reschedule => render_reschedule_modal(frame, app, root),
         ActiveModal::DailySummary => render_daily_summary_modal(frame, app, root),
+        ActiveModal::Changelog => render_changelog_modal(frame, app, root),
     }
 }
 
@@ -2340,6 +2350,110 @@ fn render_reschedule_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn render_update_banner(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(rel) = &app.available_update else {
+        return;
+    };
+    let theme = &app.config.theme;
+    let base = Style::default()
+        .fg(theme.fg_color())
+        .bg(theme.status_bg_color());
+    let hint_style = Style::default()
+        .fg(theme.hint_fg_color())
+        .bg(theme.status_bg_color())
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+
+    let spans = vec![
+        Span::styled(
+            " [alert] ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(theme.warning_color())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" new version {} released: click ", rel.tag_name),
+            Style::default()
+                .fg(theme.success_color())
+                .bg(theme.status_bg_color())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(":vc", hint_style),
+        Span::styled(" see version changelog, ", base),
+        Span::styled(":vi", hint_style),
+        Span::styled(" ignore until next release, or ", base),
+        Span::styled(":vI", hint_style),
+        Span::styled(" ignore forever ", base),
+    ];
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.status_bg_color())),
+        area,
+    );
+}
+
+fn render_changelog_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(76, 22, area);
+    frame.render_widget(Clear, popup);
+
+    let theme = &app.config.theme;
+    let block = Block::default()
+        .title(" Version Changelog (:vc) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.success_color()))
+        .padding(Padding::uniform(1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(rel) = &app.available_update {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("Release {} ", rel.tag_name),
+                Style::default()
+                    .fg(theme.success_color())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("(current v{})", crate::update::CURRENT_VERSION),
+                Style::default().fg(theme.muted_color()),
+            ),
+        ]));
+        if !rel.html_url.is_empty() {
+            lines.push(Line::from(Span::styled(
+                rel.html_url.clone(),
+                Style::default().fg(theme.accent_color()),
+            )));
+        }
+        lines.push(Line::from(""));
+        let body = if rel.body.trim().is_empty() {
+            "(No release notes provided.)"
+        } else {
+            rel.body.as_str()
+        };
+        lines.extend(markdown_lines(body, theme));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "You are up to date (v{}) or checking GitHub releases...",
+                crate::update::CURRENT_VERSION
+            ),
+            Style::default().fg(theme.fg_color()),
+        )));
+    }
+
+    let max_body = (inner.height as usize).saturating_sub(2).max(1);
+    let max_scroll = lines.len().saturating_sub(max_body);
+    let skip = app.changelog_scroll.min(max_scroll);
+
+    let mut rendered: Vec<Line<'static>> = lines.into_iter().skip(skip).take(max_body).collect();
+    rendered.push(Line::from(""));
+    rendered.push(Line::from(Span::styled(
+        "j/k/g/G: scroll | :vi: ignore this release | :vI: ignore forever | Esc/q: close",
+        Style::default().fg(theme.muted_color()),
+    )));
+    frame.render_widget(Paragraph::new(rendered).wrap(Wrap { trim: true }), inner);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2381,6 +2495,7 @@ mod tests {
             ActiveModal::Pomodoro,
             ActiveModal::Reschedule,
             ActiveModal::DailySummary,
+            ActiveModal::Changelog,
         ] {
             if modal == ActiveModal::Theme {
                 app.theme_editor = Some(ThemeEditorState::new(

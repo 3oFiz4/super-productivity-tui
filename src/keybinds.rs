@@ -268,6 +268,13 @@ pub fn all_keybinds() -> Vec<KeybindEntry> {
         },
         KeybindEntry {
             section: "System",
+            normal: ":vc / :vi / :vI",
+            nvim: ":vc / :vi / :vI",
+            description: "Version changelog / ignore release / ignore forever",
+            is_nvim_highlight: false,
+        },
+        KeybindEntry {
+            section: "System",
             normal: "q",
             nvim: "q",
             description: "Quit application",
