@@ -69,6 +69,25 @@ fn paint_bold(c: Color, text: &str, enabled: bool) -> String {
     format!("\x1b[1;38;2;{};{};{}m{text}\x1b[0m", rgb[0], rgb[1], rgb[2])
 }
 
+pub fn print_error(msg: &str, color_on: bool) {
+    let danger = AppConfig::load().theme.danger_color();
+    eprintln!(
+        "{}",
+        paint_bold(danger, &format!("!!! [ERROR] !!! {msg}"), color_on)
+    );
+}
+
+fn print_warn(theme: &ThemeConfig, msg: &str, color_on: bool) {
+    eprintln!(
+        "{}",
+        paint_bold(
+            theme.warning_color(),
+            &format!("??? [WARN] ??? {msg}"),
+            color_on
+        )
+    );
+}
+
 fn color_to_rgb(c: Color) -> [u8; 3] {
     match c {
         Color::Rgb(r, g, b) => [r, g, b],
@@ -390,15 +409,27 @@ pub fn resolve_task<'a>(tasks: &'a [Task], query: &str) -> Result<&'a Task> {
                     .map(|t| format!("  {}  {}", t.id, t.title))
                     .collect();
                 bail!(
-                    "Pattern '{query}' matched {n} tasks. Be more specific:\n{}",
+                    "ID conflict for '{query}': matched {n} tasks:\n{}",
                     preview.join("\n")
                 );
             }
         }
     }
     let prefix_matches: Vec<&Task> = tasks.iter().filter(|t| t.id.starts_with(query)).collect();
-    if prefix_matches.len() == 1 {
-        return Ok(prefix_matches[0]);
+    match prefix_matches.len() {
+        1 => return Ok(prefix_matches[0]),
+        n if n > 1 => {
+            let preview: Vec<String> = prefix_matches
+                .iter()
+                .take(5)
+                .map(|t| format!("  {}  {}", t.id, t.title))
+                .collect();
+            bail!(
+                "ID conflict for '{query}': matched {n} tasks:\n{}",
+                preview.join("\n")
+            );
+        }
+        _ => {}
     }
     let q_low = query.to_lowercase();
     let title_matches: Vec<&Task> = tasks
@@ -415,11 +446,54 @@ pub fn resolve_task<'a>(tasks: &'a [Task], query: &str) -> Result<&'a Task> {
                 .map(|t| format!("  {}  {}", t.id, t.title))
                 .collect();
             bail!(
-                "Ambiguous query '{query}' matched {n} tasks. Use an ID or dot pattern (e.g. G2.):\n{}",
+                "ID conflict / ambiguous query '{query}' matched {n} tasks:\n{}",
                 preview.join("\n")
             );
         }
     }
+}
+
+pub fn resolve_tasks<'a>(tasks: &'a [Task], queries: &[String]) -> Result<Vec<&'a Task>> {
+    let tokens: Vec<String> = queries
+        .iter()
+        .flat_map(|q| q.split(','))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        bail!("No task ID or query provided.");
+    }
+
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+    let mut first_err: Option<anyhow::Error> = None;
+
+    for tok in &tokens {
+        match resolve_task(tasks, tok) {
+            Ok(t) => {
+                if seen.insert(t.id.clone()) {
+                    resolved.push(t);
+                }
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+
+    if let Some(err) = first_err {
+        if queries.len() > 1 && !queries.iter().any(|q| q.contains(',')) {
+            let joined = queries.join(" ");
+            if let Ok(single) = resolve_task(tasks, &joined) {
+                return Ok(vec![single]);
+            }
+        }
+        return Err(err);
+    }
+
+    Ok(resolved)
 }
 
 fn format_ms(ms: u64) -> String {
@@ -507,7 +581,17 @@ async fn cmd_add(args: &[String], color_on: bool) -> Result<()> {
     let projects = all_projects(&snap.cache);
     let tags = all_tags(&snap.cache);
     let (corrected_raw, corrections) = autocorrect_short_syntax(&raw, &projects, &tags);
+    if !json_out && !corrections.is_empty() {
+        print_warn(
+            &snap.theme,
+            &format!("Auto-corrected: {}", corrections.join(", ")),
+            color_on,
+        );
+    }
     let parsed = parse_short_syntax(&corrected_raw, &projects, &tags, None, Vec::new());
+    if parsed.title.trim().is_empty() {
+        bail!("Task title cannot be empty (only short-syntax tokens were provided).");
+    }
     let payload = CreateTaskPayload {
         title: if parsed.title.is_empty() {
             corrected_raw.clone()
@@ -646,6 +730,16 @@ async fn cmd_ls(args: &[String], color_on: bool) -> Result<()> {
         ],
     );
     let view = pos.first().map(|s| s.as_str()).unwrap_or("all");
+    if !matches!(
+        view,
+        "all" | "today" | "inbox" | "planned" | "upcoming" | "overdue"
+    ) {
+        print_warn(
+            &AppConfig::load().theme,
+            &format!("Unknown view '{view}', showing 'all' tasks."),
+            color_on && !json_out,
+        );
+    }
 
     let snap = load_snapshot(true).await;
     let projects = all_projects(&snap.cache);
@@ -848,118 +942,163 @@ async fn cmd_done(args: &[String], force_undo: bool, color_on: bool) -> Result<(
     let json_out = has_any_flag(args, &["--json", "-j"]);
     let undo = force_undo || has_any_flag(args, &["--undo", "-u"]);
     let pos = positional_args(args, &[]);
-    let query = pos.join(" ").trim().to_string();
-    if query.is_empty() {
-        bail!("Usage: spt done <id|pattern|query> [-u|--undo] [-j|--json]");
+    if pos.is_empty() {
+        bail!("Usage: spt done <id1,id2,... | pattern | query> [-u|--undo] [-j|--json]");
     }
     let mut snap = load_snapshot(true).await;
-    let task = resolve_task(&snap.cache.tasks, &query)?.clone();
+    let targets: Vec<Task> = resolve_tasks(&snap.cache.tasks, &pos)?
+        .into_iter()
+        .cloned()
+        .collect();
     let target_done = !undo;
-    if let Some(t) = snap.cache.tasks.iter_mut().find(|t| t.id == task.id) {
-        t.is_done = target_done;
-    }
     let verb = if target_done {
         "✓ Completed"
     } else {
         "↺ Reopened"
     };
-    apply_patch(
-        &mut snap,
-        &task.id,
-        json!({ "isDone": target_done }),
-        json_out,
-        &format!("{verb}: {} ({})", task.title, task.id),
-        color_on,
-    )
-    .await
+    for task in targets {
+        if let Some(t) = snap.cache.tasks.iter_mut().find(|t| t.id == task.id) {
+            t.is_done = target_done;
+        }
+        apply_patch(
+            &mut snap,
+            &task.id,
+            json!({ "isDone": target_done }),
+            json_out,
+            &format!("{verb}: {} ({})", task.title, task.id),
+            color_on,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn cmd_edit(args: &[String], color_on: bool) -> Result<()> {
     let json_out = has_any_flag(args, &["--json", "-j"]);
     let pos = positional_args(args, &[]);
     if pos.len() < 2 {
-        bail!("Usage: spt edit <id|pattern|query> \"<title + short syntax>\" [-j|--json]");
+        bail!("Usage: spt edit <id1,id2,... | pattern> \"<short syntax>\" [-j|--json]");
     }
-    let query = &pos[0];
-    let raw = pos[1..].join(" ").trim().to_string();
     let mut snap = load_snapshot(true).await;
     let projects = all_projects(&snap.cache);
     let tags = all_tags(&snap.cache);
-    let task = resolve_task(&snap.cache.tasks, query)?.clone();
+
+    let (id_queries, raw) = if pos.len() >= 3 && !pos[0].contains(',') {
+        let candidate_ids = &pos[..pos.len() - 1];
+        if resolve_tasks(&snap.cache.tasks, candidate_ids).is_ok() {
+            (candidate_ids.to_vec(), pos[pos.len() - 1].clone())
+        } else {
+            (vec![pos[0].clone()], pos[1..].join(" "))
+        }
+    } else {
+        (vec![pos[0].clone()], pos[1..].join(" "))
+    };
+
+    let targets: Vec<Task> = resolve_tasks(&snap.cache.tasks, &id_queries)?
+        .into_iter()
+        .cloned()
+        .collect();
+    let multi = targets.len() > 1;
+    let raw = raw.trim().to_string();
     let (corrected_raw, corrections) = autocorrect_short_syntax(&raw, &projects, &tags);
     if !json_out && !corrections.is_empty() {
-        println!(
-            "{}",
-            paint(
-                snap.theme.warning_color(),
-                &format!("Auto-corrected: {}", corrections.join(", ")),
-                color_on
-            )
+        print_warn(
+            &snap.theme,
+            &format!("Auto-corrected: {}", corrections.join(", ")),
+            color_on,
         );
     }
     let parsed = parse_short_syntax(&corrected_raw, &projects, &tags, None, Vec::new());
 
-    let mut patch = serde_json::Map::new();
-    let final_title = if parsed.title.is_empty() {
-        task.title.clone()
-    } else {
-        parsed.title.clone()
-    };
-    patch.insert("title".to_string(), json!(final_title));
-    if let Some(pid) = &parsed.project_id {
-        patch.insert("projectId".to_string(), json!(pid));
-    }
-    let mut merged_tags = task.tag_ids.clone();
-    if !parsed.tag_ids.is_empty() {
-        for tid in &parsed.tag_ids {
-            if !merged_tags.contains(tid) {
-                merged_tags.push(tid.clone());
-            }
+    if multi {
+        let has_meta = parsed.project_id.is_some()
+            || !parsed.tag_ids.is_empty()
+            || parsed.due_day.is_some()
+            || parsed.deadline_day.is_some()
+            || parsed.time_spent.is_some()
+            || parsed.time_estimate.is_some();
+        if !parsed.title.is_empty() && !json_out {
+            print_warn(
+                &snap.theme,
+                "Title changes are ignored in multi-ID edit; only metadata (+proj, #tag, t, @due, !deadline) was applied.",
+                color_on,
+            );
         }
-        patch.insert("tagIds".to_string(), json!(merged_tags));
-    }
-    if let Some(due) = &parsed.due_day {
-        patch.insert("dueDay".to_string(), json!(due));
-    }
-    if let Some(dl) = &parsed.deadline_day {
-        patch.insert("deadlineDay".to_string(), json!(dl));
-    }
-    if let Some(ts) = parsed.time_spent {
-        patch.insert("timeSpent".to_string(), json!(ts));
-    }
-    if let Some(te) = parsed.time_estimate {
-        patch.insert("timeEstimate".to_string(), json!(te));
+        if !has_meta {
+            bail!(
+                "Multi-ID edit requires at least one metadata token (+project, #tag, t1h, @due, !deadline); title editing is excluded for multiple tasks."
+            );
+        }
     }
 
-    if let Some(t) = snap.cache.tasks.iter_mut().find(|t| t.id == task.id) {
-        t.title = final_title.clone();
-        if let Some(pid) = parsed.project_id {
-            t.project_id = Some(pid);
+    for task in targets {
+        let mut patch = serde_json::Map::new();
+        let final_title = if multi || parsed.title.is_empty() {
+            task.title.clone()
+        } else {
+            parsed.title.clone()
+        };
+        if !multi {
+            patch.insert("title".to_string(), json!(final_title));
         }
-        t.tag_ids = merged_tags;
-        if let Some(due) = parsed.due_day {
-            t.due_day = Some(due);
+        if let Some(pid) = &parsed.project_id {
+            patch.insert("projectId".to_string(), json!(pid));
         }
-        if let Some(dl) = parsed.deadline_day {
-            t.deadline_day = Some(dl);
+        let mut merged_tags = task.tag_ids.clone();
+        if !parsed.tag_ids.is_empty() {
+            for tid in &parsed.tag_ids {
+                if !merged_tags.contains(tid) {
+                    merged_tags.push(tid.clone());
+                }
+            }
+            patch.insert("tagIds".to_string(), json!(merged_tags));
+        }
+        if let Some(due) = &parsed.due_day {
+            patch.insert("dueDay".to_string(), json!(due));
+        }
+        if let Some(dl) = &parsed.deadline_day {
+            patch.insert("deadlineDay".to_string(), json!(dl));
         }
         if let Some(ts) = parsed.time_spent {
-            t.time_spent = Some(ts);
+            patch.insert("timeSpent".to_string(), json!(ts));
         }
         if let Some(te) = parsed.time_estimate {
-            t.time_estimate = Some(te);
+            patch.insert("timeEstimate".to_string(), json!(te));
         }
-    }
 
-    apply_patch(
-        &mut snap,
-        &task.id,
-        serde_json::Value::Object(patch),
-        json_out,
-        &format!("✎ Updated: {final_title} ({})", task.id),
-        color_on,
-    )
-    .await
+        if let Some(t) = snap.cache.tasks.iter_mut().find(|t| t.id == task.id) {
+            if !multi {
+                t.title = final_title.clone();
+            }
+            if let Some(pid) = parsed.project_id.clone() {
+                t.project_id = Some(pid);
+            }
+            t.tag_ids = merged_tags;
+            if let Some(due) = parsed.due_day.clone() {
+                t.due_day = Some(due);
+            }
+            if let Some(dl) = parsed.deadline_day.clone() {
+                t.deadline_day = Some(dl);
+            }
+            if let Some(ts) = parsed.time_spent {
+                t.time_spent = Some(ts);
+            }
+            if let Some(te) = parsed.time_estimate {
+                t.time_estimate = Some(te);
+            }
+        }
+
+        apply_patch(
+            &mut snap,
+            &task.id,
+            serde_json::Value::Object(patch),
+            json_out,
+            &format!("✎ Updated: {final_title} ({})", task.id),
+            color_on,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 pub fn parse_schedule_when(when: &str) -> Result<Option<String>> {
@@ -994,10 +1133,22 @@ async fn cmd_schedule(args: &[String], color_on: bool) -> Result<()> {
     let pos = positional_args(args, &["--remind", "-r"]);
     if pos.len() < 2 {
         bail!(
-            "Usage: spt schedule <id|pattern|query> <today|tomorrow|next-week|YYYY-MM-DD|clear> [-r|--remind HH:MM]"
+            "Usage: spt schedule <id1,id2,... | pattern> <today|tomorrow|next-week|YYYY-MM-DD|clear> [-r|--remind HH:MM]"
         );
     }
-    let due_day = parse_schedule_when(&pos[1])?;
+    let when_arg = &pos[pos.len() - 1];
+    let id_queries = &pos[..pos.len() - 1];
+    let due_day = parse_schedule_when(when_arg)?;
+    let mut snap = load_snapshot(true).await;
+
+    if due_day.is_none() && remind.is_some() && !json_out {
+        print_warn(
+            &snap.theme,
+            "--remind is ignored when clearing a schedule.",
+            color_on,
+        );
+    }
+
     let remind_at = if let (Some(day), Some(time_str)) = (&due_day, &remind) {
         let d = NaiveDate::parse_from_str(day, "%Y-%m-%d")?;
         let t = NaiveTime::parse_from_str(time_str, "%H:%M")
@@ -1010,81 +1161,91 @@ async fn cmd_schedule(args: &[String], color_on: bool) -> Result<()> {
         None
     };
 
-    let mut snap = load_snapshot(true).await;
-    let task = resolve_task(&snap.cache.tasks, &pos[0])?.clone();
-    if let Some(t) = snap.cache.tasks.iter_mut().find(|t| t.id == task.id) {
-        t.due_day = due_day.clone();
-        if let Some(ms) = remind_at {
-            t.remind_at = Some(ms);
-        }
-    }
-    let patch = if let Some(ms) = remind_at {
-        json!({ "dueDay": due_day, "remindAt": ms })
-    } else {
-        json!({ "dueDay": due_day })
-    };
+    let targets: Vec<Task> = resolve_tasks(&snap.cache.tasks, id_queries)?
+        .into_iter()
+        .cloned()
+        .collect();
     let label = due_day.as_deref().unwrap_or("unscheduled");
-    apply_patch(
-        &mut snap,
-        &task.id,
-        patch,
-        json_out,
-        &format!("📅 Scheduled '{}' -> {label}", task.title),
-        color_on,
-    )
-    .await
+
+    for task in targets {
+        if let Some(t) = snap.cache.tasks.iter_mut().find(|t| t.id == task.id) {
+            t.due_day = due_day.clone();
+            if let Some(ms) = remind_at {
+                t.remind_at = Some(ms);
+            }
+        }
+        let patch = if let Some(ms) = remind_at {
+            json!({ "dueDay": due_day, "remindAt": ms })
+        } else {
+            json!({ "dueDay": due_day })
+        };
+        apply_patch(
+            &mut snap,
+            &task.id,
+            patch,
+            json_out,
+            &format!("📅 Scheduled '{}' -> {label}", task.title),
+            color_on,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn cmd_rm(args: &[String], color_on: bool) -> Result<()> {
     let json_out = has_any_flag(args, &["--json", "-j"]);
     let pos = positional_args(args, &[]);
-    let query = pos.join(" ").trim().to_string();
-    if query.is_empty() {
-        bail!("Usage: spt rm <id|pattern|query> [-j|--json]");
+    if pos.is_empty() {
+        bail!("Usage: spt rm <id1,id2,... | pattern | query> [-j|--json]");
     }
     let mut snap = load_snapshot(true).await;
-    let task = resolve_task(&snap.cache.tasks, &query)?.clone();
-    snap.cache.tasks.retain(|t| t.id != task.id);
+    let targets: Vec<Task> = resolve_tasks(&snap.cache.tasks, &pos)?
+        .into_iter()
+        .cloned()
+        .collect();
 
-    if snap.online
-        && !task.id.starts_with("offline-task-")
-        && snap.client.delete_task(&task.id).await.is_ok()
-    {
-        let _ = snap.cache.save();
-        if json_out {
-            println!("{}", json!({ "deleted": task.id }));
+    for task in targets {
+        snap.cache.tasks.retain(|t| t.id != task.id);
+
+        if snap.online
+            && !task.id.starts_with("offline-task-")
+            && snap.client.delete_task(&task.id).await.is_ok()
+        {
+            let _ = snap.cache.save();
+            if json_out {
+                println!("{}", json!({ "deleted": task.id }));
+            } else {
+                println!(
+                    "{} {} {}",
+                    paint_bold(snap.theme.danger_color(), "✗ Deleted", color_on),
+                    paint(snap.theme.fg_color(), &task.title, color_on),
+                    paint(
+                        snap.theme.muted_color(),
+                        &format!("({})", task.id),
+                        color_on
+                    )
+                );
+            }
         } else {
-            println!(
-                "{} {} {}",
-                paint_bold(snap.theme.danger_color(), "✗ Deleted", color_on),
-                paint(snap.theme.fg_color(), &task.title, color_on),
-                paint(
-                    snap.theme.muted_color(),
-                    &format!("({})", task.id),
-                    color_on
-                )
-            );
+            snap.cache.pending_ops.push(QueuedOp::DeleteTask {
+                id: task.id.clone(),
+            });
+            snap.cache.save()?;
+            if json_out {
+                println!("{}", json!({ "deleted": task.id, "queued": true }));
+            } else {
+                println!(
+                    "{} {} {} (queued offline)",
+                    paint_bold(snap.theme.warning_color(), "✗ Deleted", color_on),
+                    paint(snap.theme.fg_color(), &task.title, color_on),
+                    paint(
+                        snap.theme.muted_color(),
+                        &format!("({})", task.id),
+                        color_on
+                    )
+                );
+            }
         }
-        return Ok(());
-    }
-
-    snap.cache.pending_ops.push(QueuedOp::DeleteTask {
-        id: task.id.clone(),
-    });
-    snap.cache.save()?;
-    if json_out {
-        println!("{}", json!({ "deleted": task.id, "queued": true }));
-    } else {
-        println!(
-            "{} {} {} (queued offline)",
-            paint_bold(snap.theme.warning_color(), "✗ Deleted", color_on),
-            paint(snap.theme.fg_color(), &task.title, color_on),
-            paint(
-                snap.theme.muted_color(),
-                &format!("({})", task.id),
-                color_on
-            )
-        );
     }
     Ok(())
 }
@@ -1918,5 +2079,35 @@ mod tests {
             positional_args(&args[1..], &["--note", "-n", "--parent", "-P"]),
             vec!["Buy", "milk"]
         );
+    }
+
+    #[test]
+    fn id_conflict_rejects_ambiguous_dot_pattern_and_prefix() {
+        let tasks = vec![
+            sample_task("AB1", "First task"),
+            sample_task("AB2", "Second task"),
+        ];
+        let err_dot = resolve_task(&tasks, "AB.").unwrap_err().to_string();
+        assert!(err_dot.contains("ID conflict"));
+        let err_prefix = resolve_task(&tasks, "AB").unwrap_err().to_string();
+        assert!(err_prefix.contains("ID conflict"));
+    }
+
+    #[test]
+    fn resolves_multiple_comma_and_space_ids() {
+        let tasks = vec![
+            sample_task("AB1", "First"),
+            sample_task("AB2", "Second"),
+            sample_task("CD9", "Third"),
+        ];
+        let comma = resolve_tasks(&tasks, &["AB1,CD9".to_string()]).unwrap();
+        assert_eq!(comma.len(), 2);
+        assert_eq!(comma[0].id, "AB1");
+        assert_eq!(comma[1].id, "CD9");
+
+        let space = resolve_tasks(&tasks, &["AB2".to_string(), "CD.".to_string()]).unwrap();
+        assert_eq!(space.len(), 2);
+        assert_eq!(space[0].id, "AB2");
+        assert_eq!(space[1].id, "CD9");
     }
 }

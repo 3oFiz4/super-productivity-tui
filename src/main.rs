@@ -30,7 +30,13 @@ use tokio::sync::mpsc;
 async fn main() -> Result<()> {
     let cli_args: Vec<String> = std::env::args().skip(1).collect();
     if !cli_args.is_empty() {
-        return cli::run(cli_args).await;
+        let color_on = !cli_args.iter().any(|a| a == "--no-color" || a == "-C")
+            && std::env::var_os("NO_COLOR").is_none();
+        if let Err(err) = cli::run(cli_args).await {
+            cli::print_error(&err.to_string(), color_on);
+            std::process::exit(1);
+        }
+        return Ok(());
     }
 
     enable_raw_mode()?;
