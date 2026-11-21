@@ -70,6 +70,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
     };
 
     if res.is_ok() && !suppress_update_alert {
+        maybe_print_cli_local_notice(color_on).await;
         maybe_print_cli_update_alert(color_on).await;
     }
     res
@@ -215,6 +216,7 @@ struct Snapshot {
     client: SuperProductivityClient,
     cache: OfflineCache,
     online: bool,
+    sp_installed: bool,
 }
 
 async fn load_snapshot(refresh: bool) -> Snapshot {
@@ -223,6 +225,7 @@ async fn load_snapshot(refresh: bool) -> Snapshot {
     let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
     let mut cache = OfflineCache::load();
     let mut online = false;
+    let sp_installed = crate::config::is_sp_installed();
 
     if refresh
         && let Ok(h) = client.health().await
@@ -250,6 +253,7 @@ async fn load_snapshot(refresh: bool) -> Snapshot {
         client,
         cache,
         online,
+        sp_installed,
     }
 }
 
@@ -868,8 +872,10 @@ async fn cmd_ls(args: &[String], color_on: bool) -> Result<()> {
 
     let status_dot = if snap.online {
         paint(snap.theme.success_color(), "● online", color_on)
-    } else {
+    } else if snap.sp_installed {
         paint(snap.theme.warning_color(), "○ offline", color_on)
+    } else {
+        paint(snap.theme.accent_color(), "● local", color_on)
     };
     println!(
         "{} {} {}",
@@ -1466,7 +1472,11 @@ async fn cmd_status(args: &[String], color_on: bool) -> Result<()> {
 
     if waybar {
         let class = if !snap.online {
-            "offline"
+            if snap.sp_installed {
+                "offline"
+            } else {
+                "local"
+            }
         } else if current.is_some() {
             "tracking"
         } else {
@@ -1479,7 +1489,13 @@ async fn cmd_status(args: &[String], color_on: bool) -> Result<()> {
         let tooltip = format!(
             "Today: {today_remaining} remaining\nDeadlines: {overdue_deadlines}\nPending sync: {}\nStatus: {}",
             snap.cache.pending_ops.len(),
-            if snap.online { "Online" } else { "Offline" }
+            if snap.online {
+                "Online"
+            } else if snap.sp_installed {
+                "Offline"
+            } else {
+                "Local"
+            }
         );
         println!(
             "{}",
@@ -1493,6 +1509,7 @@ async fn cmd_status(args: &[String], color_on: bool) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&json!({
                 "online": snap.online,
+                "mode": if snap.online { "online" } else if snap.sp_installed { "offline" } else { "local" },
                 "current_task": current.map(|t| json!({ "id": t.id, "title": t.title, "time_spent": t.time_spent })),
                 "today_remaining": today_remaining,
                 "deadlines": overdue_deadlines,
@@ -1504,8 +1521,10 @@ async fn cmd_status(args: &[String], color_on: bool) -> Result<()> {
 
     let conn_dot = if snap.online {
         paint(snap.theme.success_color(), "●", color_on)
-    } else {
+    } else if snap.sp_installed {
         paint(snap.theme.warning_color(), "○ offline", color_on)
+    } else {
+        paint(snap.theme.accent_color(), "● local", color_on)
     };
     match current {
         Some(t) => println!(
@@ -1976,6 +1995,7 @@ async fn cmd_doctor(args: &[String], color_on: bool) -> Result<()> {
     let client = SuperProductivityClient::new(&config.api_url, &config.api_token);
     let cache = OfflineCache::load();
     let api_ok = matches!(client.health().await, Ok(h) if h.server == "up" && h.renderer_ready);
+    let sp_installed = crate::config::is_sp_installed();
     let bridge_ok = config.bridge_port > 0
         && TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", config.bridge_port).parse()?,
@@ -1989,6 +2009,8 @@ async fn cmd_doctor(args: &[String], color_on: bool) -> Result<()> {
             serde_json::to_string_pretty(&json!({
                 "api_url": config.api_url,
                 "api_online": api_ok,
+                "sp_installed": sp_installed,
+                "mode": if api_ok { "online" } else if sp_installed { "offline" } else { "local" },
                 "bridge_port": config.bridge_port,
                 "bridge_listening": bridge_ok,
                 "config_path": AppConfig::config_path(),
@@ -2006,9 +2028,19 @@ async fn cmd_doctor(args: &[String], color_on: bool) -> Result<()> {
             "├─ API ({}): {}",
             config.api_url,
             if api_ok {
-                paint_bold(config.theme.success_color(), "OK", color_on)
+                paint_bold(config.theme.success_color(), "OK (Online)", color_on)
+            } else if sp_installed {
+                paint_bold(
+                    config.theme.danger_color(),
+                    "OFFLINE (SP installed)",
+                    color_on,
+                )
             } else {
-                paint_bold(config.theme.danger_color(), "OFFLINE", color_on)
+                paint_bold(
+                    config.theme.accent_color(),
+                    "LOCAL (SP not installed)",
+                    color_on,
+                )
             }
         );
         println!(
@@ -2040,6 +2072,42 @@ async fn cmd_doctor(args: &[String], color_on: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+async fn maybe_print_cli_local_notice(color_on: bool) {
+    if crate::config::is_sp_installed() {
+        return;
+    }
+    let mut cfg = AppConfig::load();
+    if cfg.seen_local_notice {
+        return;
+    }
+    let client = SuperProductivityClient::new(&cfg.api_url, &cfg.api_token);
+    if matches!(client.health().await, Ok(h) if h.server == "up" && h.renderer_ready) {
+        return;
+    }
+    cfg.seen_local_notice = true;
+    let _ = cfg.save();
+
+    let border = paint_bold(cfg.theme.accent_color(), "┃", color_on);
+    let info = paint_bold(cfg.theme.accent_color(), "[info]", color_on);
+    println!();
+    println!(
+        "{border} {info} {}",
+        paint_bold(
+            cfg.theme.accent_color(),
+            "Running in Local mode (Super Productivity not detected).",
+            color_on
+        )
+    );
+    println!(
+        "{border} {}",
+        paint(
+            cfg.theme.fg_color(),
+            "spt works locally, but it is built for Super Productivity — install SP anytime to enable sync.",
+            color_on
+        )
+    );
 }
 
 async fn maybe_print_cli_update_alert(color_on: bool) {

@@ -87,19 +87,26 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let fg = app.config.theme.fg_color();
     frame.render_widget(Block::default().style(Style::default().bg(bg).fg(fg)), root);
 
+    let local_h = if app.local_notice_until.is_some() {
+        1
+    } else {
+        0
+    };
     let update_h = if app.available_update.is_some() { 1 } else { 0 };
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
+            Constraint::Length(local_h),
             Constraint::Length(update_h),
             Constraint::Length(1),
         ])
         .split(root);
 
     let body = outer[0];
-    let update_bar = outer[1];
-    let status_bar = outer[2];
+    let local_bar = outer[1];
+    let update_bar = outer[2];
+    let status_bar = outer[3];
 
     if app.show_sidebar {
         let sidebar_w = (body.width * 20 / 100).max(22).min(body.width / 2);
@@ -133,6 +140,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_main(frame, app, cols[1]);
     }
 
+    if local_h > 0 {
+        render_local_notice_banner(frame, app, local_bar);
+    }
     if update_h > 0 {
         render_update_banner(frame, app, update_bar);
     }
@@ -615,6 +625,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         "hn: sidebar"
     };
     let (conn_label, conn_color) = match app.conn_state {
+        ConnectionState::Local => ("\u{25cf} Local", app.config.theme.accent_color()),
         ConnectionState::Online => ("\u{25cf} Online", app.config.theme.success_color()),
         ConnectionState::Syncing => ("\u{25cf} Sync...", Color::Rgb(96, 165, 250)),
         ConnectionState::Offline => ("\u{25cf} Offline", app.config.theme.danger_color()),
@@ -978,7 +989,7 @@ fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(64, 16, area);
+    let popup = centered_rect(72, 18, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -1079,6 +1090,10 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
             },
         ]),
         Line::from(""),
+        Line::from(Span::styled(
+            "Note: Without SP installed, spt runs in Local mode (no sync). Install SP to enable sync.",
+            Style::default().fg(app.config.theme.accent_color()),
+        )),
         Line::from(Span::styled(
             "Tab/Up/Down: move | Space: toggle | Enter: save & connect | Esc: cancel",
             Style::default().fg(app.config.theme.muted_color()),
@@ -2348,6 +2363,45 @@ fn render_reschedule_modal(frame: &mut Frame, app: &App, area: Rect) {
     )));
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_local_notice_banner(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(until) = app.local_notice_until else {
+        return;
+    };
+    let secs_left = until
+        .saturating_duration_since(std::time::Instant::now())
+        .as_secs()
+        .saturating_add(1)
+        .min(10);
+    let theme = &app.config.theme;
+    let accent = theme.accent_color();
+    let bg = theme.status_bg_color();
+
+    let spans = vec![
+        Span::styled(
+            " [info] ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " Local mode: works locally, but spt is built for Super Productivity — install SP to sync! ",
+            Style::default()
+                .fg(accent)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("(closing in {secs_left}s) "),
+            Style::default().fg(theme.muted_color()).bg(bg),
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(bg)),
+        area,
+    );
 }
 
 fn render_update_banner(frame: &mut Frame, app: &App, area: Rect) {

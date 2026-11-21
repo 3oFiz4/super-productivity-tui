@@ -62,6 +62,8 @@ pub struct AppConfig {
     pub ignore_update_forever: bool,
     #[serde(default)]
     pub ignored_update_version: Option<String>,
+    #[serde(default)]
+    pub seen_local_notice: bool,
 }
 
 fn default_bridge_port() -> u16 {
@@ -100,6 +102,7 @@ impl Default for AppConfig {
             sound_alerts: true,
             ignore_update_forever: false,
             ignored_update_version: None,
+            seen_local_notice: false,
         }
     }
 }
@@ -138,5 +141,125 @@ impl AppConfig {
         let content = toml::to_string_pretty(self)?;
         fs::write(path, content)?;
         Ok(())
+    }
+}
+
+/// Returns `true` if a Super Productivity desktop executable is detected on this machine.
+/// Developers can set `SPT_FORCE_NO_SP=1` (or `true`) to simulate SP not being installed.
+pub fn is_sp_installed() -> bool {
+    if let Ok(val) = std::env::var("SPT_FORCE_NO_SP") {
+        let v = val.trim().to_ascii_lowercase();
+        if v == "1" || v == "true" {
+            return false;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let base = PathBuf::from(local);
+            candidates.push(
+                base.join("Programs")
+                    .join("superProductivity")
+                    .join("superProductivity.exe"),
+            );
+            candidates.push(base.join("superProductivity").join("superProductivity.exe"));
+        }
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            candidates.push(
+                PathBuf::from(pf)
+                    .join("superProductivity")
+                    .join("superProductivity.exe"),
+            );
+        }
+        if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
+            candidates.push(
+                PathBuf::from(pf86)
+                    .join("superProductivity")
+                    .join("superProductivity.exe"),
+            );
+        }
+        if candidates.iter().any(|p| p.is_file()) {
+            return true;
+        }
+        if let Ok(path_var) = std::env::var("PATH") {
+            for dir in std::env::split_paths(&path_var) {
+                if dir.join("superProductivity.exe").is_file()
+                    || dir.join("superproductivity.exe").is_file()
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut candidates = vec![
+            PathBuf::from("/usr/bin/superproductivity"),
+            PathBuf::from("/usr/local/bin/superproductivity"),
+            PathBuf::from("/opt/superProductivity/superproductivity"),
+            PathBuf::from("/var/lib/flatpak/exports/bin/com.super_productivity.SuperProductivity"),
+        ];
+        if let Ok(home) = std::env::var("HOME") {
+            let h = PathBuf::from(home);
+            candidates.push(h.join(".local/bin/superproductivity"));
+            candidates.push(
+                h.join(".local/share/flatpak/exports/bin/com.super_productivity.SuperProductivity"),
+            );
+        }
+        if candidates.iter().any(|p| p.is_file()) {
+            return true;
+        }
+        if let Ok(path_var) = std::env::var("PATH") {
+            for dir in std::env::split_paths(&path_var) {
+                if dir.join("superproductivity").is_file() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut candidates = vec![PathBuf::from("/Applications/superProductivity.app")];
+        if let Ok(home) = std::env::var("HOME") {
+            candidates.push(PathBuf::from(home).join("Applications/superProductivity.app"));
+        }
+        if candidates.iter().any(|p| p.exists()) {
+            return true;
+        }
+        if let Ok(path_var) = std::env::var("PATH") {
+            for dir in std::env::split_paths(&path_var) {
+                if dir.join("superproductivity").is_file() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_sp_installed;
+
+    #[test]
+    fn sp_detection_respects_force_no_sp_override() {
+        // Safe in unit test scope; restore immediately.
+        let prev = std::env::var("SPT_FORCE_NO_SP").ok();
+        unsafe {
+            std::env::set_var("SPT_FORCE_NO_SP", "1");
+        }
+        assert!(!is_sp_installed());
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("SPT_FORCE_NO_SP", v),
+                None => std::env::remove_var("SPT_FORCE_NO_SP"),
+            }
+        }
     }
 }

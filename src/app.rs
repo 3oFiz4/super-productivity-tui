@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
+    Local,
     Offline,
     Syncing,
     Online,
@@ -819,6 +820,7 @@ pub struct App {
     pub available_update: Option<crate::update::ReleaseInfo>,
     pub changelog_scroll: usize,
     pub colon_v_pending: bool,
+    pub local_notice_until: Option<Instant>,
 
     pub areas: UiAreas,
     pub api_tx: mpsc::UnboundedSender<ApiEvent>,
@@ -854,6 +856,11 @@ impl App {
         let tasks = std::mem::take(&mut cache.tasks);
         let current_task_id = cache.current_task_id.clone();
         cache.tasks = tasks.clone();
+        let initial_conn = if crate::config::is_sp_installed() {
+            ConnectionState::Offline
+        } else {
+            ConnectionState::Local
+        };
         Self {
             config,
             client,
@@ -871,7 +878,7 @@ impl App {
             tags,
             counters,
             connected: false,
-            conn_state: ConnectionState::Offline,
+            conn_state: initial_conn,
             status_message: String::new(),
             last_health_check_at: Instant::now(),
             health_check_in_flight: false,
@@ -922,6 +929,7 @@ impl App {
             available_update: None,
             changelog_scroll: 0,
             colon_v_pending: false,
+            local_notice_until: None,
             areas: UiAreas::default(),
             api_tx,
         }
@@ -1155,9 +1163,14 @@ impl App {
                 self.connected = connected;
                 self.conn_state = if connected {
                     ConnectionState::Online
-                } else {
+                } else if crate::config::is_sp_installed() {
                     ConnectionState::Offline
+                } else {
+                    ConnectionState::Local
                 };
+                if self.conn_state == ConnectionState::Local {
+                    self.maybe_trigger_local_notice();
+                }
                 if connected {
                     self.tasks = tasks;
                     let mut merged_projects = projects;
@@ -1204,9 +1217,16 @@ impl App {
                 if !self.connected && is_up {
                     self.connected = true;
                     self.sync_with_replay();
-                } else if self.connected && !is_up {
+                } else if !is_up {
                     self.connected = false;
-                    self.conn_state = ConnectionState::Offline;
+                    self.conn_state = if crate::config::is_sp_installed() {
+                        ConnectionState::Offline
+                    } else {
+                        ConnectionState::Local
+                    };
+                    if self.conn_state == ConnectionState::Local {
+                        self.maybe_trigger_local_notice();
+                    }
                 }
             }
             ApiEvent::ReplayFinished {
@@ -1709,8 +1729,22 @@ impl App {
             self.sync_with_replay();
         }
 
+        if let Some(until) = self.local_notice_until
+            && Instant::now() >= until
+        {
+            self.local_notice_until = None;
+        }
         self.check_scheduled_reminders();
         self.check_due_and_deadline_notifications();
+    }
+
+    pub fn maybe_trigger_local_notice(&mut self) {
+        if self.conn_state == ConnectionState::Local && !self.config.seen_local_notice {
+            self.config.seen_local_notice = true;
+            #[cfg(not(test))]
+            let _ = self.config.save();
+            self.local_notice_until = Some(Instant::now() + Duration::from_secs(10));
+        }
     }
 
     fn send_alert(&self, title: &str, body: &str) {
@@ -5246,7 +5280,10 @@ mod tests {
             connected: false,
             message: String::new(),
         });
-        assert_eq!(app.conn_state, ConnectionState::Offline);
+        assert!(matches!(
+            app.conn_state,
+            ConnectionState::Offline | ConnectionState::Local
+        ));
         assert_eq!(app.tasks.len(), 1);
 
         // HealthCheck(true) transitions Offline -> Online -> Syncing
@@ -5271,7 +5308,10 @@ mod tests {
         // HealthCheck(false) transitions Online -> Offline
         app.handle_api_event(ApiEvent::HealthCheck(false));
         assert!(!app.connected);
-        assert_eq!(app.conn_state, ConnectionState::Offline);
+        assert!(matches!(
+            app.conn_state,
+            ConnectionState::Offline | ConnectionState::Local
+        ));
     }
 
     #[tokio::test]

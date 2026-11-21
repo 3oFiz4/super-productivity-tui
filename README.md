@@ -47,7 +47,9 @@ Freely manage your tasks, subtasks, projects, tags, deadlines, focus sessions, d
   - 21 built-in themes including `AMOLED`, `Catppuccin Mocha`, `Catppuccin Latte`, `Tokyo Night`, `Gruvbox Dark`, `Nord`, `Dracula`, `One Dark`, `Solarized Dark/Light`, `Monokai Pro`, `Everforest Dark`, `Kanagawa`, `Rose Pine`, `Rose Pine Moon`, `GitHub Dark`, `Ayu Dark`, `Nightfox`, `Cyberpunk`, `Material Ocean`, and `Default`.
   - Live non-dimmed preview, interactive 2D RGB map + HEX color editor, custom theme saving.
 - **Auto-Sync & Manual Sync (`S`)**: Automatically syncs on startup, after API mutations, and every **30 seconds** in the background while idle; press `S` at any time for an immediate sync, if the automatic sync fails :3.
-- **Offline Queue & Local Cache**: Queue task creations/updates locally when Super Productivity is closed and replay them automatically on reconnect.
+- **Offline Queue & Local Mode**: Works standalone in `Local` mode when Super Productivity is not installed yet (transitions automatically to `Offline` / `Online` and syncs queued changes once SP is installed and running).
+- **Automatic Update Checker (`:vc` / `:vi` / `:vI`)**: Checks GitHub Releases for new versions in both TUI and CLI, with Markdown changelog viewer and per-release or permanent mute options.
+- **Desktop Notifications & Sound Alerts**: Optional OS toast notifications and terminal bell/audio cues across Focus Mode, scheduled reminders, due dates, and deadlines.
 - **Daily Summary & End-of-Day Review**: Interactive wrap-up modal showing completed tasks, total focus time, and carry-over prompts for unfinished tasks. (`:r` or `E`)
 - **Project & Tag Management**: Full CRUD/reordering/color editing for Projects and Tags (excluding delete method) once supported by the Local REST API.
 - **Desktop Notifications & Sound Alerts**: Optional OS notifications and terminal bell/audio cues when Pomodoro, Flowtime, or Countdown, Scheduling, Due dates reminders.
