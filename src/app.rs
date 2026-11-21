@@ -1702,6 +1702,9 @@ impl App {
 
         if self.projects_expanded {
             for proj in &self.projects {
+                if proj.id == "INBOX_PROJECT" {
+                    continue;
+                }
                 let f = NavFilter::Project(proj.id.clone());
                 top.push(NavRow {
                     label: proj.title.clone(),
@@ -6262,5 +6265,32 @@ mod tests {
         assert_eq!(app.tasks[0].time_estimate, Some(3_600_000));
         assert_eq!(app.tasks[0].due_day.as_deref(), Some(tomorrow.as_str()));
         assert_eq!(app.tasks[0].deadline_day.as_deref(), Some("2026-12-31"));
+    }
+
+    #[test]
+    fn nav_projects_hides_builtin_inbox_project() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        app.projects = vec![
+            Project {
+                id: "INBOX_PROJECT".into(),
+                title: "Inbox".into(),
+                theme: None,
+                color: None,
+            },
+            Project {
+                id: "p1".into(),
+                title: "Work".into(),
+                theme: None,
+                color: None,
+            },
+        ];
+        let (top, _) = app.nav_rows();
+        let project_rows: Vec<_> = top
+            .iter()
+            .filter(|r| matches!(r.kind, NavItemKind::Filter(NavFilter::Project(_))))
+            .collect();
+        assert_eq!(project_rows.len(), 1);
+        assert_eq!(project_rows[0].label, "Work");
     }
 }
