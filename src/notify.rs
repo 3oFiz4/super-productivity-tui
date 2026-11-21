@@ -19,6 +19,7 @@ pub fn dispatch(desktop_enabled: bool, sound_enabled: bool, title: &str, body: &
     }
 }
 
+#[allow(dead_code)]
 pub fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {

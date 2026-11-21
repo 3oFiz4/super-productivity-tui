@@ -4074,7 +4074,8 @@ impl App {
                 .map(|s| (*s).to_string())
                 .collect();
             (CompletionKind::Due, items)
-        } else if let Some(prefix) = token.strip_prefix('!') {
+        } else {
+            let prefix = token.strip_prefix('!')?;
             let p_low = prefix.to_lowercase();
             let presets = [
                 "today",
@@ -4092,8 +4093,6 @@ impl App {
                 .map(|s| (*s).to_string())
                 .collect();
             (CompletionKind::Deadline, items)
-        } else {
-            return None;
         };
 
         if items.is_empty() {
