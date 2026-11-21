@@ -90,6 +90,8 @@ pub struct AppConfig {
     pub desktop_notifications: bool,
     #[serde(default = "default_true")]
     pub sound_alerts: bool,
+    #[serde(default = "default_true")]
+    pub word_wrap: bool,
     #[serde(default)]
     pub ignore_update_forever: bool,
     #[serde(default)]
@@ -140,6 +142,7 @@ impl Default for AppConfig {
             bridge_port: default_bridge_port(),
             desktop_notifications: true,
             sound_alerts: true,
+            word_wrap: true,
             ignore_update_forever: false,
             ignored_update_version: None,
             seen_local_notice: false,

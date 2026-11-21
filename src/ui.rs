@@ -387,33 +387,24 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let visible_h = list_area.height as usize;
-    if visible_h > 0 {
-        if app.task_selected < app.task_scroll {
-            app.task_scroll = app.task_selected;
-        } else if app.task_selected >= app.task_scroll + visible_h {
-            app.task_scroll = app.task_selected + 1 - visible_h;
-        }
-    }
+    let width = list_area.width.max(1) as usize;
+    let word_wrap = app.config.word_wrap;
     let rows = app.visible_task_rows();
 
-    let mut task_rows = Vec::new();
-    let mut renaming_row_y: Option<u16> = None;
+    struct PreparedTaskRow {
+        idx: usize,
+        lines: Vec<Line<'static>>,
+        is_renaming: bool,
+    }
 
-    for (row_y, (idx, (task, is_subtask))) in
-        (list_area.y..list_area.bottom()).zip(rows.iter().enumerate().skip(app.task_scroll))
-    {
-        let row_rect = Rect::new(list_area.x, row_y, list_area.width, 1);
-        task_rows.push((row_rect, idx));
-
+    let mut prepared_rows = Vec::with_capacity(rows.len());
+    for (idx, (task, is_subtask)) in rows.iter().enumerate() {
         let is_selected = app.focus == FocusSection::Main && app.task_selected == idx;
         let is_multi_selected = app.visual_mode && app.selected_task_ids.contains(&task.id);
         let is_renaming = matches!(
             &app.rename_target,
             Some(crate::app::RenameTarget::Task(id)) if id == &task.id
         );
-        if is_renaming {
-            renaming_row_y = Some(row_y);
-        }
 
         let checkbox = if is_multi_selected {
             if task.is_done {
@@ -447,12 +438,22 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 task.title.clone()
             };
-            let line = format!("    {checkbox} {title_text}");
-            let pad = (row_rect.width as usize).saturating_sub(line.chars().count());
-            frame.render_widget(
-                Paragraph::new(format!("{line}{}", " ".repeat(pad))).style(sub_style),
-                row_rect,
-            );
+            let prefix = format!("    {checkbox} ");
+            let lines = if word_wrap {
+                build_wrapped_task_lines(&prefix, &title_text, "      ", &[], width, sub_style, None)
+            } else {
+                let line = format!("{prefix}{title_text}");
+                let pad = width.saturating_sub(line.chars().count());
+                vec![Line::from(Span::styled(
+                    format!("{line}{}", " ".repeat(pad)),
+                    sub_style,
+                ))]
+            };
+            prepared_rows.push(PreparedTaskRow {
+                idx,
+                lines,
+                is_renaming,
+            });
             continue;
         }
 
@@ -554,24 +555,80 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD);
         }
 
-        let left_text = format!(" {checkbox} {title_text}");
-        let meta_width: usize = meta_parts.iter().map(|s| s.content.chars().count()).sum();
-        let pad = (row_rect.width as usize).saturating_sub(left_text.chars().count() + meta_width);
+        let selected_bg = (is_selected || is_multi_selected)
+            .then_some(app.config.theme.selection_bg_color());
+        let prefix = format!(" {checkbox} ");
+        let lines = if word_wrap {
+            build_wrapped_task_lines(
+                &prefix,
+                &title_text,
+                "    ",
+                &meta_parts,
+                width,
+                row_style,
+                selected_bg,
+            )
+        } else {
+            let left_text = format!("{prefix}{title_text}");
+            let meta_width: usize = meta_parts.iter().map(|s| s.content.chars().count()).sum();
+            let pad = width.saturating_sub(left_text.chars().count() + meta_width);
+            let mut spans = vec![
+                Span::styled(left_text, row_style),
+                Span::styled(" ".repeat(pad), row_style),
+            ];
+            for part in meta_parts {
+                let s = if let Some(bg) = selected_bg {
+                    part.style.bg(bg)
+                } else {
+                    part.style
+                };
+                spans.push(Span::styled(part.content, s));
+            }
+            vec![Line::from(spans)]
+        };
+        prepared_rows.push(PreparedTaskRow {
+            idx,
+            lines,
+            is_renaming,
+        });
+    }
 
-        let mut spans = vec![
-            Span::styled(left_text, row_style),
-            Span::styled(" ".repeat(pad), row_style),
-        ];
-        for part in meta_parts {
-            let s = if is_selected {
-                part.style.bg(app.config.theme.selection_bg_color())
-            } else {
-                part.style
-            };
-            spans.push(Span::styled(part.content, s));
+    if visible_h > 0 && !prepared_rows.is_empty() {
+        let sel = app.task_selected.min(prepared_rows.len() - 1);
+        if sel < app.task_scroll {
+            app.task_scroll = sel;
         }
+        while app.task_scroll < sel {
+            let used: usize = prepared_rows[app.task_scroll..=sel]
+                .iter()
+                .map(|r| r.lines.len())
+                .sum();
+            if used <= visible_h {
+                break;
+            }
+            app.task_scroll += 1;
+        }
+    }
 
-        frame.render_widget(Paragraph::new(Line::from(spans)), row_rect);
+    let mut task_rows = Vec::new();
+    let mut renaming_row_y: Option<u16> = None;
+    let mut cur_y = list_area.y;
+
+    for row in prepared_rows.into_iter().skip(app.task_scroll) {
+        if cur_y >= list_area.bottom() {
+            break;
+        }
+        let avail_h = (list_area.bottom() - cur_y) as usize;
+        let render_h = row.lines.len().min(avail_h) as u16;
+        let row_rect = Rect::new(list_area.x, cur_y, list_area.width, render_h);
+        task_rows.push((row_rect, row.idx));
+        if row.is_renaming {
+            renaming_row_y = Some(cur_y + render_h.saturating_sub(1));
+        }
+        let visible_lines: Vec<Line<'static>> =
+            row.lines.into_iter().take(render_h as usize).collect();
+        frame.render_widget(Paragraph::new(visible_lines), row_rect);
+        cur_y += render_h;
     }
     app.areas.task_rows = task_rows;
 
@@ -616,6 +673,149 @@ fn format_ms(ms: u64) -> String {
     } else {
         format!("{m}m")
     }
+}
+
+fn wrap_text_lines(text: &str, first_max: usize, cont_max: usize) -> Vec<String> {
+    let first_max = first_max.max(1);
+    let cont_max = cont_max.max(1);
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_limit = first_max;
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if cur.is_empty() {
+            if word_len <= cur_limit {
+                cur.push_str(word);
+            } else {
+                let mut chunk = String::new();
+                for ch in word.chars() {
+                    if chunk.chars().count() >= cur_limit {
+                        lines.push(chunk);
+                        chunk = String::new();
+                        cur_limit = cont_max;
+                    }
+                    chunk.push(ch);
+                }
+                cur = chunk;
+            }
+        } else if cur.chars().count() + 1 + word_len <= cur_limit {
+            cur.push(' ');
+            cur.push_str(word);
+        } else {
+            lines.push(cur);
+            cur = String::new();
+            cur_limit = cont_max;
+            if word_len <= cur_limit {
+                cur.push_str(word);
+            } else {
+                let mut chunk = String::new();
+                for ch in word.chars() {
+                    if chunk.chars().count() >= cur_limit {
+                        lines.push(chunk);
+                        chunk = String::new();
+                    }
+                    chunk.push(ch);
+                }
+                cur = chunk;
+            }
+        }
+    }
+
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
+fn build_wrapped_task_lines(
+    prefix: &str,
+    title: &str,
+    cont_indent: &str,
+    meta_parts: &[Span<'static>],
+    width: usize,
+    row_style: Style,
+    selected_bg: Option<Color>,
+) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let prefix_len = prefix.chars().count();
+    let cont_len = cont_indent.chars().count();
+    let first_max = width.saturating_sub(prefix_len).max(1);
+    let cont_max = width.saturating_sub(cont_len).max(1);
+    let title_lines = wrap_text_lines(title, first_max, cont_max);
+
+    let apply_bg = |s: Style| -> Style {
+        if let Some(bg) = selected_bg {
+            s.bg(bg)
+        } else {
+            s
+        }
+    };
+
+    let meta_width: usize = meta_parts.iter().map(|s| s.content.chars().count()).sum();
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(title_lines.len() + 1);
+    let last_idx = title_lines.len() - 1;
+
+    for (i, tline) in title_lines.into_iter().enumerate() {
+        let lead = if i == 0 { prefix } else { cont_indent };
+        let lead_len = if i == 0 { prefix_len } else { cont_len };
+        let used = lead_len + tline.chars().count();
+
+        if i == last_idx && !meta_parts.is_empty() && used + meta_width <= width {
+            let pad = width - used - meta_width;
+            let mut spans = vec![
+                Span::styled(format!("{lead}{tline}"), row_style),
+                Span::styled(" ".repeat(pad), row_style),
+            ];
+            for part in meta_parts {
+                spans.push(Span::styled(part.content.clone(), apply_bg(part.style)));
+            }
+            out.push(Line::from(spans));
+        } else {
+            let pad = width.saturating_sub(used);
+            out.push(Line::from(vec![
+                Span::styled(format!("{lead}{tline}"), row_style),
+                Span::styled(" ".repeat(pad), row_style),
+            ]));
+        }
+    }
+
+    // If meta_parts didn't fit on the last title line, wrap them onto continuation lines.
+    if !meta_parts.is_empty() {
+        let last_used_fits = {
+            // Check whether meta_parts were already placed on the last line
+            out.last().is_some_and(|l| l.spans.len() > 2)
+        };
+        if !last_used_fits {
+            let mut cur_spans = vec![Span::styled(cont_indent.to_string(), row_style)];
+            let mut cur_len = cont_len;
+            for part in meta_parts {
+                let plen = part.content.chars().count();
+                if cur_len > cont_len && cur_len + plen > width {
+                    let pad = width.saturating_sub(cur_len);
+                    if pad > 0 {
+                        cur_spans.push(Span::styled(" ".repeat(pad), row_style));
+                    }
+                    out.push(Line::from(cur_spans));
+                    cur_spans = vec![Span::styled(cont_indent.to_string(), row_style)];
+                    cur_len = cont_len;
+                }
+                cur_spans.push(Span::styled(part.content.clone(), apply_bg(part.style)));
+                cur_len += plen;
+            }
+            let pad = width.saturating_sub(cur_len);
+            if pad > 0 {
+                cur_spans.push(Span::styled(" ".repeat(pad), row_style));
+            }
+            out.push(Line::from(cur_spans));
+        }
+    }
+
+    out
 }
 
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -776,7 +976,7 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
                 style,
             )));
         }
-        frame.render_widget(Paragraph::new(lines), inner);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         return;
     }
 
@@ -885,7 +1085,7 @@ fn render_properties_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
@@ -991,7 +1191,7 @@ fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
 fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
     let st = &app.settings_state;
     let is_ss = st.sync_mode == SyncMode::SuperSync;
-    let height = if is_ss { 21 } else { 19 };
+    let height = if is_ss { 23 } else { 21 };
     let popup = centered_rect(76, height, area);
     frame.render_widget(Clear, popup);
 
@@ -1129,6 +1329,13 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
             field_style(SettingsField::SoundAlerts),
         ),
     ]));
+    lines.push(Line::from(vec![
+        Span::raw("Word Wrap:     "),
+        Span::styled(
+            if st.word_wrap { "true" } else { "false" },
+            field_style(SettingsField::WordWrap),
+        ),
+    ]));
     if !is_ss {
         lines.push(Line::from(vec![
             Span::raw("SP Plugin:     "),
@@ -1159,7 +1366,7 @@ fn render_settings_modal(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(app.config.theme.muted_color()),
     )));
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_add_task_modal(frame: &mut Frame, app: &App, area: Rect) {
@@ -1647,7 +1854,7 @@ fn render_add_entity_modal(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(muted),
         )),
     ];
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn markdown_lines(text: &str, theme: &crate::theme::ThemeConfig) -> Vec<Line<'static>> {
@@ -2006,7 +2213,7 @@ fn render_history_modal(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(muted),
     )));
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_counters_modal(frame: &mut Frame, app: &App, area: Rect) {
@@ -2066,7 +2273,7 @@ fn render_counters_modal(frame: &mut Frame, app: &App, area: Rect) {
         "+/- or h/l: adjust | r: reset | a: add | Esc/q: close",
         Style::default().fg(muted),
     )));
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_pomodoro_modal(frame: &mut Frame, app: &App, area: Rect) {
@@ -2421,7 +2628,7 @@ fn render_reschedule_modal(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(muted),
     )));
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_local_notice_banner(frame: &mut Frame, app: &App, area: Rect) {

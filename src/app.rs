@@ -459,6 +459,7 @@ pub enum SettingsField {
     BridgePort,
     DesktopNotifications,
     SoundAlerts,
+    WordWrap,
 }
 
 impl SettingsField {
@@ -471,7 +472,8 @@ impl SettingsField {
             (SyncMode::LocalRest, Self::HintKeybind) => Self::BridgePort,
             (SyncMode::LocalRest, Self::BridgePort) => Self::DesktopNotifications,
             (SyncMode::LocalRest, Self::DesktopNotifications) => Self::SoundAlerts,
-            (SyncMode::LocalRest, Self::SoundAlerts) => Self::SyncMode,
+            (SyncMode::LocalRest, Self::SoundAlerts) => Self::WordWrap,
+            (SyncMode::LocalRest, Self::WordWrap) => Self::SyncMode,
             (SyncMode::SuperSync, Self::SyncMode) => Self::SuperSyncUrl,
             (SyncMode::SuperSync, Self::SuperSyncUrl) => Self::SuperSyncToken,
             (SyncMode::SuperSync, Self::SuperSyncToken) => Self::SuperSyncEncryptKey,
@@ -480,14 +482,15 @@ impl SettingsField {
             (SyncMode::SuperSync, Self::KeybindMode) => Self::HintKeybind,
             (SyncMode::SuperSync, Self::HintKeybind) => Self::DesktopNotifications,
             (SyncMode::SuperSync, Self::DesktopNotifications) => Self::SoundAlerts,
-            (SyncMode::SuperSync, Self::SoundAlerts) => Self::SyncMode,
+            (SyncMode::SuperSync, Self::SoundAlerts) => Self::WordWrap,
+            (SyncMode::SuperSync, Self::WordWrap) => Self::SyncMode,
             _ => Self::SyncMode,
         }
     }
 
     pub fn prev(self, mode: SyncMode) -> Self {
         match (mode, self) {
-            (SyncMode::LocalRest, Self::SyncMode) => Self::SoundAlerts,
+            (SyncMode::LocalRest, Self::SyncMode) => Self::WordWrap,
             (SyncMode::LocalRest, Self::ApiUrl) => Self::SyncMode,
             (SyncMode::LocalRest, Self::ApiToken) => Self::ApiUrl,
             (SyncMode::LocalRest, Self::KeybindMode) => Self::ApiToken,
@@ -495,7 +498,8 @@ impl SettingsField {
             (SyncMode::LocalRest, Self::BridgePort) => Self::HintKeybind,
             (SyncMode::LocalRest, Self::DesktopNotifications) => Self::BridgePort,
             (SyncMode::LocalRest, Self::SoundAlerts) => Self::DesktopNotifications,
-            (SyncMode::SuperSync, Self::SyncMode) => Self::SoundAlerts,
+            (SyncMode::LocalRest, Self::WordWrap) => Self::SoundAlerts,
+            (SyncMode::SuperSync, Self::SyncMode) => Self::WordWrap,
             (SyncMode::SuperSync, Self::SuperSyncUrl) => Self::SyncMode,
             (SyncMode::SuperSync, Self::SuperSyncToken) => Self::SuperSyncUrl,
             (SyncMode::SuperSync, Self::SuperSyncEncryptKey) => Self::SuperSyncToken,
@@ -504,6 +508,7 @@ impl SettingsField {
             (SyncMode::SuperSync, Self::HintKeybind) => Self::KeybindMode,
             (SyncMode::SuperSync, Self::DesktopNotifications) => Self::HintKeybind,
             (SyncMode::SuperSync, Self::SoundAlerts) => Self::DesktopNotifications,
+            (SyncMode::SuperSync, Self::WordWrap) => Self::SoundAlerts,
             _ => Self::SyncMode,
         }
     }
@@ -523,6 +528,7 @@ pub struct SettingsState {
     pub bridge_port: String,
     pub desktop_notifications: bool,
     pub sound_alerts: bool,
+    pub word_wrap: bool,
     pub active_field: SettingsField,
 }
 
@@ -541,6 +547,7 @@ impl From<&AppConfig> for SettingsState {
             bridge_port: cfg.bridge_port.to_string(),
             desktop_notifications: cfg.desktop_notifications,
             sound_alerts: cfg.sound_alerts,
+            word_wrap: cfg.word_wrap,
             active_field: SettingsField::SyncMode,
         }
     }
@@ -1201,6 +1208,7 @@ impl App {
         self.config.hint_keybind = self.settings_state.hint_keybind;
         self.config.desktop_notifications = self.settings_state.desktop_notifications;
         self.config.sound_alerts = self.settings_state.sound_alerts;
+        self.config.word_wrap = self.settings_state.word_wrap;
         if let Ok(port) = self.settings_state.bridge_port.trim().parse::<u16>() {
             self.config.bridge_port = port;
         }
@@ -4349,6 +4357,9 @@ impl App {
                 SettingsField::SoundAlerts => {
                     self.settings_state.sound_alerts = !self.settings_state.sound_alerts;
                 }
+                SettingsField::WordWrap => {
+                    self.settings_state.word_wrap = !self.settings_state.word_wrap;
+                }
                 SettingsField::ApiUrl => self.settings_state.api_url.push(' '),
                 SettingsField::ApiToken => self.settings_state.api_token.push(' '),
                 SettingsField::SuperSyncUrl => self.settings_state.supersync_url.push(' '),
@@ -4407,6 +4418,9 @@ impl App {
                 }
                 SettingsField::SoundAlerts => {
                     self.settings_state.sound_alerts = !self.settings_state.sound_alerts;
+                }
+                SettingsField::WordWrap => {
+                    self.settings_state.word_wrap = !self.settings_state.word_wrap;
                 }
             },
             _ => {}
