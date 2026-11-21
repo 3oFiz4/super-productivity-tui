@@ -806,6 +806,7 @@ pub struct App {
     pub projects_expanded: bool,
     pub tags_expanded: bool,
     pub nav_selected: usize,
+    pub nav_scroll: usize,
     pub task_selected: usize,
     pub task_scroll: usize,
 
@@ -958,6 +959,7 @@ impl App {
             projects_expanded: true,
             tags_expanded: true,
             nav_selected: 0,
+            nav_scroll: 0,
             task_selected: 0,
             task_scroll: 0,
             tasks,

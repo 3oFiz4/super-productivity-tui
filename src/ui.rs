@@ -221,17 +221,37 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let top_area = sections[1];
     let bottom_area = sections[2];
+    let visible_top_h = top_area.height as usize;
 
-    let mut global_idx = 0;
-    for (i, row) in top_rows.iter().enumerate() {
-        let y = top_area.y + i as u16;
+    if visible_top_h > 0 && !top_rows.is_empty() {
+        if app.nav_selected < top_rows.len() {
+            if app.nav_selected < app.nav_scroll {
+                app.nav_scroll = app.nav_selected;
+            } else if app.nav_selected >= app.nav_scroll + visible_top_h {
+                app.nav_scroll = app.nav_selected + 1 - visible_top_h;
+            }
+        }
+        let max_scroll = top_rows.len().saturating_sub(visible_top_h);
+        if app.nav_scroll > max_scroll {
+            app.nav_scroll = max_scroll;
+        }
+    } else {
+        app.nav_scroll = 0;
+    }
+
+    for (offset, (i, row)) in top_rows
+        .iter()
+        .enumerate()
+        .skip(app.nav_scroll)
+        .enumerate()
+    {
+        let y = top_area.y + offset as u16;
         if y >= top_area.bottom() {
             break;
         }
         let row_rect = Rect::new(top_area.x, y, top_area.width, 1);
-        app.areas.nav_rows.push((row_rect, global_idx));
-        render_nav_row(frame, app, row, global_idx, row_rect);
-        global_idx += 1;
+        app.areas.nav_rows.push((row_rect, i));
+        render_nav_row(frame, app, row, i, row_rect);
     }
 
     if bottom_area.height > 0 {
@@ -243,6 +263,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     }
 
+    let mut global_idx = top_rows.len();
     for (i, row) in bottom_rows.iter().enumerate() {
         let y = bottom_area.y + 1 + i as u16;
         if y >= bottom_area.bottom() {
