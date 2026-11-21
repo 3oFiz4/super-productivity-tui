@@ -1817,30 +1817,125 @@ impl App {
 
     pub fn filtered_tasks(&self) -> Vec<&Task> {
         let q = self.search_query.trim().to_lowercase();
+        let today = Local::now().date_naive();
         self.tasks
             .iter()
             .filter(|t| t.parent_id.is_none() && Self::matches_filter(t, &self.active_filter))
-            .filter(|t| {
-                if q.is_empty() {
-                    return true;
+            .filter(|t| q.is_empty() || self.task_matches_search(t, &q, today))
+            .collect()
+    }
+
+    fn task_matches_search(&self, task: &Task, query: &str, today: chrono::NaiveDate) -> bool {
+        let today_str = today.format("%Y-%m-%d").to_string();
+        query.split_whitespace().all(|token| {
+            if let Some(tag_q) = token.strip_prefix('#') {
+                if tag_q.is_empty() {
+                    return !task.tag_ids.is_empty();
                 }
-                if fuzzy_match(&t.title.to_lowercase(), &q) {
-                    return true;
-                }
-                if let Some(pid) = &t.project_id
-                    && let Some(p) = self.projects.iter().find(|p| &p.id == pid)
-                    && fuzzy_match(&p.title.to_lowercase(), &q)
-                {
-                    return true;
-                }
-                t.tag_ids.iter().any(|tid| {
+                return task.tag_ids.iter().any(|tid| {
                     self.tags
                         .iter()
                         .find(|tg| &tg.id == tid)
-                        .is_some_and(|tg| fuzzy_match(&tg.title.to_lowercase(), &q))
-                })
-            })
-            .collect()
+                        .is_some_and(|tg| fuzzy_match(&tg.title.to_lowercase(), tag_q))
+                });
+            }
+            if let Some(proj_q) = token.strip_prefix('+') {
+                if proj_q.is_empty() {
+                    return task.project_id.is_some();
+                }
+                if proj_q == "inbox" {
+                    return task.project_id.is_none();
+                }
+                return task.project_id.as_ref().is_some_and(|pid| {
+                    self.projects
+                        .iter()
+                        .find(|p| &p.id == pid)
+                        .is_some_and(|p| fuzzy_match(&p.title.to_lowercase(), proj_q))
+                });
+            }
+            if let Some(due_q) = token.strip_prefix('@') {
+                let Some(due) = &task.due_day else {
+                    return false;
+                };
+                if due_q.is_empty() {
+                    return true;
+                }
+                if due_q == "overdue" {
+                    return due.as_str() < today_str.as_str();
+                }
+                if let Some(parsed) = crate::short_syntax::parse_date_expr(due_q, today) {
+                    return due == &parsed;
+                }
+                return fuzzy_match(&due.to_lowercase(), due_q);
+            }
+            if let Some(dl_q) = token.strip_prefix('!') {
+                let Some(dl) = &task.deadline_day else {
+                    return false;
+                };
+                if dl_q.is_empty() {
+                    return true;
+                }
+                if dl_q == "overdue" {
+                    return dl.as_str() < today_str.as_str();
+                }
+                if let Some(parsed) = crate::short_syntax::parse_date_expr(dl_q, today) {
+                    return dl == &parsed;
+                }
+                return fuzzy_match(&dl.to_lowercase(), dl_q);
+            }
+            if matches!(
+                token,
+                "is_done" | "is:done" | "is_done:true" | "is_done=true"
+            ) {
+                return task.is_done;
+            }
+            if matches!(
+                token,
+                "is_done:false" | "is_done=false" | "is:undone" | "is:open" | "undone"
+            ) {
+                return !task.is_done;
+            }
+            if matches!(token, "is:repeat" | "repeat") {
+                return task.repeat_cfg_id.is_some();
+            }
+            if matches!(token, "is:tracking" | "tracking") {
+                return self.current_task_id.as_deref() == Some(task.id.as_str());
+            }
+
+            if fuzzy_match(&task.title.to_lowercase(), token) {
+                return true;
+            }
+            if let Some(pid) = &task.project_id
+                && let Some(p) = self.projects.iter().find(|p| &p.id == pid)
+                && fuzzy_match(&p.title.to_lowercase(), token)
+            {
+                return true;
+            }
+            if task.tag_ids.iter().any(|tid| {
+                self.tags
+                    .iter()
+                    .find(|tg| &tg.id == tid)
+                    .is_some_and(|tg| fuzzy_match(&tg.title.to_lowercase(), token))
+            }) {
+                return true;
+            }
+            if task
+                .notes
+                .as_deref()
+                .is_some_and(|n| fuzzy_match(&n.to_lowercase(), token))
+            {
+                return true;
+            }
+            if task.due_day.as_deref().is_some_and(|d| d.contains(token))
+                || task
+                    .deadline_day
+                    .as_deref()
+                    .is_some_and(|d| d.contains(token))
+            {
+                return true;
+            }
+            token == "done" && task.is_done
+        })
     }
 
     pub fn subtasks_for(&self, parent_id: &str) -> Vec<&Task> {
@@ -6308,5 +6403,68 @@ mod tests {
             .collect();
         assert_eq!(project_rows.len(), 1);
         assert_eq!(project_rows[0].label, "Work");
+    }
+
+    #[test]
+    fn main_search_supports_tags_projects_dates_and_is_done() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), tx);
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        app.projects = vec![Project {
+            id: "p1".into(),
+            title: "Work".into(),
+            theme: None,
+            color: None,
+        }];
+        app.tags = vec![Tag {
+            id: "tag1".into(),
+            title: "urgent".into(),
+            color: None,
+            theme: None,
+        }];
+        app.tasks = vec![
+            Task {
+                id: "t1".into(),
+                title: "Deploy server".into(),
+                is_done: true,
+                notes: None,
+                project_id: Some("p1".into()),
+                parent_id: None,
+                tag_ids: vec!["tag1".into()],
+                due_day: Some(today.clone()),
+                deadline_day: Some("2026-12-31".into()),
+                remind_at: None,
+                done_on: None,
+                time_estimate: None,
+                time_spent: None,
+                repeat_cfg_id: None,
+            },
+            Task {
+                id: "t2".into(),
+                title: "Buy milk".into(),
+                is_done: false,
+                notes: None,
+                project_id: None,
+                parent_id: None,
+                tag_ids: vec![],
+                due_day: None,
+                deadline_day: None,
+                remind_at: None,
+                done_on: None,
+                time_estimate: None,
+                time_spent: None,
+                repeat_cfg_id: None,
+            },
+        ];
+
+        app.search_query = "+work #urgent @today !2026-12-31 is_done".into();
+        let res = app.filtered_tasks();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].id, "t1");
+
+        app.search_query = "is_done:false +inbox".into();
+        let res2 = app.filtered_tasks();
+        assert_eq!(res2.len(), 1);
+        assert_eq!(res2[0].id, "t2");
     }
 }

@@ -239,12 +239,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         app.nav_scroll = 0;
     }
 
-    for (offset, (i, row)) in top_rows
-        .iter()
-        .enumerate()
-        .skip(app.nav_scroll)
-        .enumerate()
-    {
+    for (offset, (i, row)) in top_rows.iter().enumerate().skip(app.nav_scroll).enumerate() {
         let y = top_area.y + offset as u16;
         if y >= top_area.bottom() {
             break;
@@ -263,8 +258,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     }
 
-    let mut global_idx = top_rows.len();
-    for (i, row) in bottom_rows.iter().enumerate() {
+    for (global_idx, (i, row)) in (top_rows.len()..).zip(bottom_rows.iter().enumerate()) {
         let y = bottom_area.y + 1 + i as u16;
         if y >= bottom_area.bottom() {
             break;
@@ -272,7 +266,6 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         let row_rect = Rect::new(bottom_area.x, y, bottom_area.width, 1);
         app.areas.nav_rows.push((row_rect, global_idx));
         render_nav_row(frame, app, row, global_idx, row_rect);
-        global_idx += 1;
     }
 }
 
@@ -480,7 +473,15 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
             };
             let prefix = format!("    {checkbox} ");
             let lines = if word_wrap {
-                build_wrapped_task_lines(&prefix, &title_text, "      ", &[], width, sub_style, None)
+                build_wrapped_task_lines(
+                    &prefix,
+                    &title_text,
+                    "      ",
+                    &[],
+                    width,
+                    sub_style,
+                    None,
+                )
             } else {
                 let line = format!("{prefix}{title_text}");
                 let pad = width.saturating_sub(line.chars().count());
@@ -595,8 +596,8 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD);
         }
 
-        let selected_bg = (is_selected || is_multi_selected)
-            .then_some(app.config.theme.selection_bg_color());
+        let selected_bg =
+            (is_selected || is_multi_selected).then_some(app.config.theme.selection_bg_color());
         let prefix = format!(" {checkbox} ");
         let lines = if word_wrap {
             build_wrapped_task_lines(

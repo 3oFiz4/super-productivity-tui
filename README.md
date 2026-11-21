@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/220b082d-f626-4e31-a14c-3818a0de2199
 
 </details>
 
-A blazing fast vim-supported terminal client for **Super Productivity (SP)**, made in Rust (ratatui) and connected to Super Productivity's Local REST API.
+A blazing fast vim-supported terminal client for **Super Productivity (SP) API**, made in Rust (ratatui) and connected to your own choice of API! Whether you wanna use SP's Local REST API or directly to SuperSync (no background app) itself, ORR if you have no SP yet, don't worry your to-do will be saved locally and will be pushed to SP when you installed it already :)... So yes, this tool right here have option for those who hasn't installed SP yet, standalone to-do tui program :3.
 
 Freely manage your tasks, subtasks, projects, tags, deadlines, focus sessions, daily habits, worklogs, and terminal colorschemes without having to open super-productivity EVER... i mean it.
 
@@ -55,7 +55,8 @@ Freely manage your tasks, subtasks, projects, tags, deadlines, focus sessions, d
 - **Desktop Notifications & Sound Alerts**: Optional OS notifications and terminal bell/audio cues when Pomodoro, Flowtime, or Countdown, Scheduling, Due dates reminders.
 - **Vim Visual / Multi-Select Mode (`v` / `V`)**: Select multiple tasks to batch-complete, reschedule, move to a project, or delete in one action. Even SP didn't support this lol.
 - **Inline Task Editing (`e` / `i`)**: Edit task titles, time estimates, and due dates inline without opening a full modal.
-- CLI version `spt ls` if you're lazy to open the TUI
+- CLI version `spt ls` - **CLI Subcommands (`spt add`, `spt ls`, `spt sync`)**: Scriptable non-interactive CLI mode for shell aliases, cron jobs, and status bars (Waybar/Polybar/tmux). Especially when you're lazy to open the TUI
+- **SuperSync connection**: Hate having to establish another Local REST API that communicates with SP process behind? Well, just use SuperSync API instead! No electron app behind.
 
 ---
 
@@ -76,11 +77,10 @@ Ranked from most prioritized to less. Want to suggest a feature? Create a Issue,
 10. [l] **Habit Streaks & Counter History**: Multi-day streak tracking and sparkline charts for Simple Counters. (Opinion: I personally rarely use habits for whatever reason)
 11. [l] **CSV / JSON / Markdown Export**: Export Worklog and History reports directly to Markdown tables, CSV, or JSON.
 12. [l] **Mouse Drag & Click Support**: Clickable sidebar items, task checkboxes, and scroll-wheel support across all panels.
-13. [h] **CLI Subcommands (`spt add`, `spt ls`, `spt sync`)**: Scriptable non-interactive CLI mode for shell aliases, cron jobs, and status bars (Waybar/Polybar/tmux).
-14. [l] **Plugin / Webhook Hooks**: Run custom shell scripts on events like `task_completed` or `pomodoro_finished`.
-15. [l] **Multi-Instance Profiles**: Switch between multiple Super Productivity API endpoints/tokens (e.g., Work vs. Personal) from `:s` or CLI flags.
-16. [m] **Undo/Redo Persistence**: Persist the 100-step undo history across `spt` restarts.
-17. [m] **Custom Nerd Font / ASCII Icon Toggle**: Config option to switch cleanly between Nerd Font glyphs and pure ASCII/Unicode symbols.
+13. [l] **Plugin / Webhook Hooks**: Run custom shell scripts on events like `task_completed` or `pomodoro_finished`.
+14. [l] **Multi-Instance Profiles**: Switch between multiple Super Productivity API endpoints/tokens (e.g., Work vs. Personal) from `:s` or CLI flags.
+15. [m] **Undo/Redo Persistence**: Persist the 100-step undo history across `spt` restarts.
+16. [m] **Custom Nerd Font / ASCII Icon Toggle**: Config option to switch cleanly between Nerd Font glyphs and pure ASCII/Unicode symbols.
 
 ## Bugs
 
@@ -92,7 +92,7 @@ Ranked from most prioritized to less. Want to suggest a feature? Create a Issue,
 ## Requirements
 
 - [Rust toolchain](https://rustup.rs/) (`cargo`, `rustc` supporting Rust 2024 edition)
-- [Super Productivity](https://super-productivity.com/) desktop app running locally with the **Local REST API** enabled (default: `http://127.0.0.1:3876`)
+- (optional) [Super Productivity](https://super-productivity.com/) desktop app running locally with the **Local REST API** enabled (default: `http://127.0.0.1:3876`)
 - A Nerd Font in your terminal emulator for crisp folder, tag, checkbox, and calendar icons (optional, degrades cleanly)
 
 ---
@@ -128,7 +128,7 @@ ORRRRRR just go to release and install it already as ready-to-use `.exe` :3:
    - Linux/macOS: `~/.config/super-productivity-tui/config.toml`
    - Windows: `%APPDATA%\super-productivity-tui\config.toml`
 
-#### Getting your Token
+#### 1. Getting your Token
 
 1. On Super productivity, head to Settings.
 2. Go to `General`
@@ -137,7 +137,7 @@ ORRRRRR just go to release and install it already as ready-to-use `.exe` :3:
 5. Copy your `Access Token`
 6. Done :3.... don't leak it though.
 
-#### Auto-Start REST API on Boot
+#### 2. Auto-Start REST API on Boot (for Local REST API, might be abandoned soon)
 
 The Local REST API runs inside Super Productivity's background process. To keep it running automatically on startup without manually opening the app window:
 
@@ -145,6 +145,21 @@ The Local REST API runs inside Super Productivity's background process. To keep 
 2. **Windows**: Press `Win+R` → `shell:startup` → add a shortcut to `Super Productivity.exe` with `--minimized` in Target.
 3. **Linux**: Add `superproductivity --minimized` to your DE/WM startup or `~/.config/autostart/superproductivity.desktop`.
 4. **macOS**: Add Super Productivity to **System Settings → General → Login Items**.
+
+#### 2. SuperSync API (recommended)
+
+Instead of using Local REST API, you can instead use SuperSync API:
+
+1. Launch `spt` and open Settings (:s).
+2. On `Sync Mode`, press Space to switch to SuperSync.
+3. Keep SS URL at https://sync.super-productivity.com (or enter your self-hosted SuperSync URL).
+4. Set SS Token:
+   • Either paste your SuperSync JWT token, or tab to Browser Login ([ Connect via Browser ]), press Enter/Space, and approve the matching code in your browser.
+5. Set SS Password to the exact encryption password configured in Super Productivity's SuperSync settings.
+6. Press Enter to save and sync (● Sync... → ● Online).
+   • You can also verify from the terminal via spt doctor and spt sync.
+
+To test whether it works or not, if you're still unsure: Create any to-do task in SPT, make sure no SP port opened. Close SPT, then open SP and check if it synced automatically.
 
 #### Companion Plugin (Create / Edit / Delete Projects & Tags)
 
