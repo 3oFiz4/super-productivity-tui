@@ -251,9 +251,9 @@ Run `spt --help` for the full list of subcommands and flags.
 
 ## Credit
 
-Heavily Inspired by: ![super-productivity-cli](https://github.com/onesvat/super-productivity-cli). _When I initially intent to find a CLI to my SP, I was searching for it until I found this repo, it's old but it's still very useful showing how SP API can be used. I thanked the owner of the repo for showing how it's done. If it's not because of this repo, this repo wouldn't exist either :), feel free to give the owner some stars too!_
+Heavily Inspired by: [super-productivity-cli](https://github.com/onesvat/super-productivity-cli). _When I initially intent to find a CLI to my SP, I was searching for it until I found this repo, it's old but it's still very useful showing how SP API can be used. I thanked the owner of the repo for showing how it's done. If it's not because of this repo, this repo wouldn't exist either :), feel free to give the owner some stars too!_
 
-Made for: ![super-productivity](https://github.com/super-productivity/super-productivity). _I mean.. it's obvious though :)_
+Made for: [super-productivity](https://github.com/super-productivity/super-productivity). _I mean.. it's obvious though :)_
 
 
 ## License
